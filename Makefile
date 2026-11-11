@@ -53,7 +53,10 @@ DEFINES		:= -DREMOTE_SERVER=\"$(REMOTE_SERVER)\"
 # ---------
 
 # Cœur ARM7 avec DSWiFi (obligatoire pour le Wi-Fi)
-ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
+# DIAGNOSTIC écran blanc DSi : ARM7 minimal (sans Wi-Fi) pour savoir si
+# arm7_dswifi bloque l'init. Remettre arm7_dswifi.elf ensuite.
+#ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
+ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_minimal.elf
 
 # HTTPS : Mbed TLS + libcurl + zlib (paquets à installer, voir le README) :
 #   wf-pacman -Sy toolchain-gcc-arm-none-eabi-zlib blocksds-mbedtls blocksds-libcurl
