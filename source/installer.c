@@ -287,14 +287,15 @@ static size_t header_cb(char *buf, size_t size, size_t nitems, void *ud)
         const char *v = line + 5;
         while (*v == ' ')
             v++;
-        snprintf(inst.etag, sizeof(inst.etag), "%s", v);
+        // Tronqué si énorme : sans danger, on compare toujours la même valeur
+        snprintf(inst.etag, sizeof(inst.etag), "%.79s", v);
     }
     else if (strncasecmp(line, "last-modified:", 14) == 0)
     {
         const char *v = line + 14;
         while (*v == ' ')
             v++;
-        snprintf(inst.modified, sizeof(inst.modified), "%s", v);
+        snprintf(inst.modified, sizeof(inst.modified), "%.39s", v);
     }
     return len;
 }

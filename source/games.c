@@ -66,7 +66,7 @@ static void read_manifest(const char *dir, manifest_cb cb, void *ud)
     if (!f)
         return;
 
-    char line[1024];
+    char line[1536]; // Toutes les colonnes de game_t + tabulations
     while (fgets(line, sizeof(line), f))
     {
         line[strcspn(line, "\r\n")] = '\0';

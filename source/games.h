@@ -19,7 +19,7 @@ typedef struct {
     uint64_t size;
     char source[256];   // Lien saisi à l'installation (projet GitHub ou URL)
     char version[64];   // Tag de la release (ou vide)
-    char url[320];      // Adresse exacte du fichier téléchargé
+    char url[512];      // Adresse exacte du fichier téléchargé
     char etag[80];      // En-tête HTTP ETag du téléchargement
     char modified[40];  // En-tête HTTP Last-Modified du téléchargement
 } game_t;
