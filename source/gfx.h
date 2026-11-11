@@ -13,7 +13,7 @@
 #define SCREEN_H 192
 
 // Couleur 15 bits à partir de composantes 8 bits, bit 15 = pixel opaque
-#define RGB8(r, g, b) ((uint16_t)((((r) >> 3) & 31) | ((((g) >> 3) & 31) << 5) | \
+#define COLOR_RGB(r, g, b) ((uint16_t)((((r) >> 3) & 31) | ((((g) >> 3) & 31) << 5) | \
                                   ((((b) >> 3) & 31) << 10) | 0x8000))
 
 typedef enum {

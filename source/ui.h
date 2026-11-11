@@ -9,20 +9,20 @@
 #include "input.h"
 
 // Thème
-#define COL_BG         RGB8(16, 20, 30)
-#define COL_BG2        RGB8(24, 30, 46)
-#define COL_PANEL      RGB8(34, 42, 62)
-#define COL_PANEL_HI   RGB8(48, 60, 88)
-#define COL_PANEL_DOWN RGB8(26, 32, 48)
-#define COL_BORDER     RGB8(60, 72, 104)
-#define COL_ACCENT     RGB8(64, 156, 255)
-#define COL_ACCENT_DK  RGB8(36, 104, 200)
-#define COL_TEXT       RGB8(236, 240, 248)
-#define COL_TEXT_DIM   RGB8(150, 160, 184)
-#define COL_TEXT_OFF   RGB8(96, 104, 128)
-#define COL_OK         RGB8(80, 210, 130)
-#define COL_WARN       RGB8(250, 190, 70)
-#define COL_ERR        RGB8(250, 96, 96)
+#define COL_BG         COLOR_RGB(16, 20, 30)
+#define COL_BG2        COLOR_RGB(24, 30, 46)
+#define COL_PANEL      COLOR_RGB(34, 42, 62)
+#define COL_PANEL_HI   COLOR_RGB(48, 60, 88)
+#define COL_PANEL_DOWN COLOR_RGB(26, 32, 48)
+#define COL_BORDER     COLOR_RGB(60, 72, 104)
+#define COL_ACCENT     COLOR_RGB(64, 156, 255)
+#define COL_ACCENT_DK  COLOR_RGB(36, 104, 200)
+#define COL_TEXT       COLOR_RGB(236, 240, 248)
+#define COL_TEXT_DIM   COLOR_RGB(150, 160, 184)
+#define COL_TEXT_OFF   COLOR_RGB(96, 104, 128)
+#define COL_OK         COLOR_RGB(80, 210, 130)
+#define COL_WARN       COLOR_RGB(250, 190, 70)
+#define COL_ERR        COLOR_RGB(250, 96, 96)
 
 typedef struct {
     int x, y, w, h;

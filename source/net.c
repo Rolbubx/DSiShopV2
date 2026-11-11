@@ -335,7 +335,7 @@ static struct {
     volatile http_state_t state;
     char host[128];
     char path[256];
-    char progress[96];
+    char progress[192];
     int status_code;
     size_t received;
     const char *body;

@@ -214,7 +214,7 @@ bool ui_button(canvas_t *c, rect_t r, const char *label, btn_style_t style,
     switch (style)
     {
         case BTN_STYLE_PRIMARY: bg = COL_ACCENT_DK; break;
-        case BTN_STYLE_DANGER:  bg = RGB8(150, 52, 64); break;
+        case BTN_STYLE_DANGER:  bg = COLOR_RGB(150, 52, 64); break;
         default:                bg = COL_PANEL_HI; break;
     }
 
@@ -225,7 +225,7 @@ bool ui_button(canvas_t *c, rect_t r, const char *label, btn_style_t style,
     }
     else if (pressed)
     {
-        bg = gfx_blend(bg, RGB8(0, 0, 0), 5);
+        bg = gfx_blend(bg, COLOR_RGB(0, 0, 0), 5);
     }
 
     const int radius = 6;
@@ -236,7 +236,7 @@ bool ui_button(canvas_t *c, rect_t r, const char *label, btn_style_t style,
     // Petit reflet en haut pour donner du relief
     if (enabled && !pressed)
         gfx_hline(c, r.x + radius, r.y + 1, r.w - radius * 2,
-                  gfx_blend(bg, RGB8(255, 255, 255), 3));
+                  gfx_blend(bg, COLOR_RGB(255, 255, 255), 3));
 
     const font_t *f = &font_body;
     gfx_text_box(c, f, r.x + 6, r.y + (r.h - f->height) / 2 + (pressed ? 1 : 0),
@@ -359,7 +359,7 @@ void ui_draw_toast(canvas_t *c)
     int h = f->height + 10;
     int x = (SCREEN_W - w) / 2, y = 26;
 
-    gfx_fill_round_rect(c, x, y, w, h, h / 2, RGB8(8, 10, 16));
+    gfx_fill_round_rect(c, x, y, w, h, h / 2, COLOR_RGB(8, 10, 16));
     gfx_round_rect(c, x, y, w, h, h / 2, COL_BORDER);
     gfx_text_box(c, f, x + 10, y + 5, w - 20, ALIGN_CENTER, ui.toast, COL_TEXT);
 }
