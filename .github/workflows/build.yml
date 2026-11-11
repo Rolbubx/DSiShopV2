@@ -1,0 +1,35 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  nds:
+    name: ROM .nds (BlocksDS)
+    runs-on: ubuntu-latest
+    container: skylyrac/blocksds:slim-v1.25.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilation
+        run: make -j$(nproc)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSiShop
+          path: DSiShop.nds
+
+  sim:
+    name: Simulateur PC (captures d'écran)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilation et exécution
+        run: |
+          make -C tools/sim
+          mkdir -p screenshots
+          ./tools/sim/dsishop_sim screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
