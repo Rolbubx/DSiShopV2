@@ -38,7 +38,9 @@ source/
   gfx.c/.h      primitives de dessin et texte (portable, sans libnds)
   gfx_hw.c      config VRAM / fonds bitmap (spécifique DS)
   net.c/.h      Wi-Fi + HTTP (DSWiFi)
-  installer.c/.h  installation de jeux (API GitHub, libcurl, zip, vérif ROM)
+  installer.c/.h  installation de jeux (API GitHub, libcurl, vérif ROM)
+  splitfile.c/.h  fichier découpé en morceaux de 1 Go (limite FAT32 de 4 Go)
+  zip.c/.h      extraction ZIP / ZIP64 (portable, testé sur PC)
   cacert.s      embarque data/cacert.pem (certificats racines)
   font.h        format des polices
   font_data.c   polices générées (ne pas éditer)
@@ -46,6 +48,7 @@ tools/
   gen_font.py   régénère font_data.c (Pillow + police Inter)
   gen_icon.py   régénère icon.gif
   sim/          simulateur PC : exécute app/ui/gfx avec un faux réseau et sort des captures
+  test/         tests PC de zip.c et splitfile.c (`make -C tools/test check BIG=--big`)
 ```
 
 ## Compiler
@@ -69,6 +72,13 @@ make
 
 Ça produit `DSiShop.nds`. Le CI GitHub (`.github/workflows/build.yml`) compile aussi la
 ROM à chaque push : récupère-la dans les artefacts du run.
+
+### Tests PC
+
+```sh
+make -C tools/test check            # archives zip, morceaux, CRC...
+make -C tools/test check BIG=--big  # + archive ZIP64 de 4,5 Go (fichiers creux)
+```
 
 ### Simulateur PC
 
@@ -98,6 +108,13 @@ Formats de lien acceptés :
 
 - Le `https://` est optionnel.
 - Si c'est un `.zip`, la première ROM `.nds` (sinon `.dsi`) trouvée dedans est extraite.
+- **Fichiers de plus de 4 Go** : la carte SD est en FAT32, qui limite chaque fichier à
+  4 Go. Le téléchargement est donc écrit en **morceaux de 1 Go**
+  (`.dsishop_download.000`, `.001`…), puis relu comme un seul fichier. Les archives
+  **ZIP64** (zip de plus de 4 Go, ex. un pack) sont gérées : la ROM est extraite
+  directement depuis les morceaux, qui sont ensuite supprimés. Une ROM DS/DSi fait au
+  plus 512 Mo, donc la ROM installée tient toujours en un seul fichier. L'espace libre
+  est vérifié avant de télécharger.
 - La ROM est validée grâce au CRC de son en-tête avant d'être installée, et une
   version déjà présente est remplacée.
 - Le dossier d'installation est `sd:/roms/nds/` en mode DSi (`fat:/roms/nds/` sur

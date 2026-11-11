@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 
 #include <curl/curl.h>
 #include <fat.h>
@@ -15,6 +16,8 @@
 #include <zlib.h>
 
 #include "installer.h"
+#include "splitfile.h"
+#include "zip.h"
 
 #define USER_AGENT "DSiShop/0.2 (Nintendo DSi; +https://github.com)"
 
@@ -43,10 +46,14 @@ static struct {
     char name[128];        // Nom du fichier
     char release[64];
     char dest[256];
-    char tmp[256];
-    char tmp2[256];
+    char tmp[256];         // Base du téléchargement découpé (.000, .001...)
+    char tmp2[256];        // ROM extraite d'une archive
 
-    size_t now, total;
+    uint64_t now, total;
+
+    bool space_checked;
+    bool no_space;
+    uint64_t space_needed, space_free;
 
     cothread_t thread;
     bool thread_alive;
@@ -175,15 +182,34 @@ static bool is_nds_rom(const char *path)
     return crc16(hdr, 0x15E) == expected;
 }
 
-static bool is_zip(const char *path)
+// Regarde la signature "PK\3\4" au début du téléchargement
+static bool is_zip(sfile_t *sf)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return false;
     uint8_t sig[4] = { 0 };
-    size_t n = fread(sig, 1, 4, f);
-    fclose(f);
-    return n == 4 && sig[0] == 'P' && sig[1] == 'K' && sig[2] == 3 && sig[3] == 4;
+    return sfile_seek(sf, 0) && sfile_read(sf, sig, 4) == 4 &&
+           sig[0] == 'P' && sig[1] == 'K' && sig[2] == 3 && sig[3] == 4;
+}
+
+// "1,4 Go", "820 Mo"...
+static void format_size(char *out, size_t size, uint64_t bytes)
+{
+    const uint64_t MB = 1024 * 1024, GB = MB * 1024;
+    if (bytes >= GB)
+        snprintf(out, size, "%u,%u Go", (unsigned)(bytes / GB),
+                 (unsigned)((bytes % GB) * 10 / GB));
+    else
+        snprintf(out, size, "%u Mo", (unsigned)((bytes + MB - 1) / MB));
+}
+
+// Espace libre sur la carte SD
+static bool free_space(uint64_t *out)
+{
+    struct statvfs st;
+    if (statvfs(inst.dir, &st) != 0)
+        return false;
+    uint64_t block = st.f_frsize ? st.f_frsize : st.f_bsize;
+    *out = (uint64_t)st.f_bavail * block;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,25 +233,41 @@ static size_t write_mem(char *ptr, size_t size, size_t nmemb, void *userdata)
     return n;
 }
 
+// Écrit dans un fichier découpé : un nouveau morceau tous les 1 Go, ce qui
+// permet de dépasser la limite de 4 Go par fichier du FAT32
 static size_t write_file(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
-    return fwrite(ptr, size, nmemb, (FILE *)userdata);
+    return sfile_write((sfile_t *)userdata, ptr, size * nmemb);
 }
 
 static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
                        curl_off_t ultotal, curl_off_t ulnow)
 {
     (void)p; (void)ultotal; (void)ulnow;
-    inst.now = (size_t)dlnow;
-    inst.total = (size_t)dltotal;
+    inst.now = (uint64_t)dlnow;
+    inst.total = (uint64_t)dltotal;
     if (inst.cancel)
         return 1;
+
+    // Dès que la taille est connue, on vérifie qu'il y a la place sur la SD
+    if (!inst.space_checked && dltotal > 0)
+    {
+        inst.space_checked = true;
+        uint64_t avail;
+        if (free_space(&avail) && (uint64_t)dltotal > avail)
+        {
+            inst.no_space = true;
+            inst.space_needed = (uint64_t)dltotal;
+            inst.space_free = avail;
+            return 1;
+        }
+    }
     cothread_yield(); // Laisse l'interface se mettre à jour
     return 0;
 }
 
 // Effectue un GET. Écrit dans un fichier (file != NULL) ou en mémoire.
-static int http_get(const char *url, bool github_api, FILE *file, membuf_t *mem)
+static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *mem)
 {
     CURL *curl = curl_easy_init();
     if (!curl)
@@ -278,6 +320,8 @@ static int http_get(const char *url, bool github_api, FILE *file, membuf_t *mem)
 
     inst.now = 0;
     inst.total = 0;
+    inst.space_checked = false;
+    inst.no_space = false;
 
     CURLcode res = curl_easy_perform(curl);
 
@@ -294,6 +338,15 @@ static int http_get(const char *url, bool github_api, FILE *file, membuf_t *mem)
     switch (res)
     {
         case CURLE_ABORTED_BY_CALLBACK:
+            if (inst.no_space)
+            {
+                char need[24], have[24];
+                format_size(need, sizeof(need), inst.space_needed);
+                format_size(have, sizeof(have), inst.space_free);
+                snprintf(buf, sizeof(buf), "Pas assez de place sur la carte SD : "
+                         "il faut %s, il reste %s", need, have);
+                return fail(buf);
+            }
             return fail("Installation annulée");
         case CURLE_COULDNT_RESOLVE_HOST:
             return fail("Serveur introuvable (DNS). Vérifie le lien et la connexion.");
@@ -484,221 +537,37 @@ static int resolve_github(const char *api_url)
 }
 
 // ---------------------------------------------------------------------------
-// Extraction ZIP (méthodes "stored" et "deflate")
+// Extraction ZIP (zip.c : ZIP et ZIP64, lu à travers les morceaux)
 // ---------------------------------------------------------------------------
 
-static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
-static uint32_t rd32(const uint8_t *p)
+static int on_zip_progress(void *ud, uint64_t done, uint64_t total)
 {
-    return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+    (void)ud;
+    inst.now = done;
+    inst.total = total;
+    cothread_yield();
+    return inst.cancel ? 1 : 0;
 }
 
-static int extract_zip(const char *zip_path, const char *out_path)
+static int extract_zip(sfile_t *sf, const char *out_path)
 {
     inst.state = INST_EXTRACTING;
-    set_msg("Extraction de l'archive…", NULL);
-
-    FILE *f = fopen(zip_path, "rb");
-    if (!f)
-        return fail("Impossible d'ouvrir l'archive téléchargée");
-
-    // Cherche la fin du répertoire central (dans les 64 derniers Ko)
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    long tail = size < 65557 ? size : 65557;
-    uint8_t *buf = malloc(tail);
-    if (!buf)
-    {
-        fclose(f);
-        return fail("Mémoire insuffisante");
-    }
-    fseek(f, size - tail, SEEK_SET);
-    if (fread(buf, 1, tail, f) != (size_t)tail)
-        tail = 0;
-
-    long eocd = -1;
-    for (long i = tail - 22; i >= 0; i--)
-    {
-        if (rd32(buf + i) == 0x06054b50)
-        {
-            eocd = i;
-            break;
-        }
-    }
-    if (eocd < 0)
-    {
-        free(buf);
-        fclose(f);
-        return fail("Archive .zip invalide");
-    }
-
-    uint16_t entries = rd16(buf + eocd + 10);
-    uint32_t cd_size = rd32(buf + eocd + 12);
-    uint32_t cd_offset = rd32(buf + eocd + 16);
-    free(buf);
-
-    uint8_t *cd = malloc(cd_size);
-    if (!cd)
-    {
-        fclose(f);
-        return fail("Mémoire insuffisante");
-    }
-    fseek(f, cd_offset, SEEK_SET);
-    if (fread(cd, 1, cd_size, f) != cd_size)
-    {
-        free(cd);
-        fclose(f);
-        return fail("Archive .zip tronquée");
-    }
-
-    // Cherche la ROM : .nds en priorité, sinon .dsi
-    long best = -1;
-    int best_rank = 99;
-    char best_name[128] = "";
-    uint32_t off = 0;
-    for (int i = 0; i < entries && off + 46 <= cd_size; i++)
-    {
-        const uint8_t *e = cd + off;
-        if (rd32(e) != 0x02014b50)
-            break;
-        uint16_t nlen = rd16(e + 28), xlen = rd16(e + 30), clen = rd16(e + 32);
-
-        char name[256];
-        size_t n = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1;
-        memcpy(name, e + 46, n);
-        name[n] = '\0';
-
-        int rank = 99;
-        if (strstr(name, "__MACOSX") == NULL)
-        {
-            if (ends_with_ci(name, ".nds"))
-                rank = 0;
-            else if (ends_with_ci(name, ".dsi"))
-                rank = 1;
-        }
-        if (rank < best_rank)
-        {
-            best_rank = rank;
-            best = off;
-            basename_from_url(name, best_name, sizeof(best_name));
-        }
-
-        off += 46 + nlen + xlen + clen;
-    }
-
-    if (best < 0)
-    {
-        free(cd);
-        fclose(f);
-        return fail("Aucun fichier .nds ou .dsi dans l'archive");
-    }
-
-    const uint8_t *e = cd + best;
-    uint16_t method = rd16(e + 10);
-    uint32_t crc_expected = rd32(e + 16);
-    uint32_t comp_size = rd32(e + 20);
-    uint32_t uncomp_size = rd32(e + 24);
-    uint32_t local_off = rd32(e + 42);
-    free(cd);
-
-    snprintf(inst.name, sizeof(inst.name), "%s", best_name);
-
-    if (method != 0 && method != 8)
-    {
-        fclose(f);
-        return fail("Méthode de compression .zip non supportée");
-    }
-
-    uint8_t lh[30];
-    fseek(f, local_off, SEEK_SET);
-    if (fread(lh, 1, 30, f) != 30 || rd32(lh) != 0x04034b50)
-    {
-        fclose(f);
-        return fail("Archive .zip corrompue");
-    }
-    fseek(f, local_off + 30 + rd16(lh + 26) + rd16(lh + 28), SEEK_SET);
-
-    FILE *out = fopen(out_path, "wb");
-    if (!out)
-    {
-        fclose(f);
-        return fail("Impossible d'écrire sur la carte SD");
-    }
-
-    const size_t CHUNK = 16 * 1024;
-    uint8_t *in_buf = malloc(CHUNK), *out_buf = malloc(CHUNK);
-    z_stream zs = { 0 };
-    bool ok = in_buf && out_buf;
-    if (ok && method == 8)
-        ok = inflateInit2(&zs, -MAX_WBITS) == Z_OK;
-
-    uint32_t remaining = comp_size;
-    uint32_t written = 0, crc = crc32(0, Z_NULL, 0);
-    int zret = Z_OK;
     inst.now = 0;
-    inst.total = uncomp_size;
+    inst.total = 0;
+    unsigned int parts = sfile_part_count(sf);
+    if (parts > 1)
+        snprintf(inst.msg, sizeof(inst.msg),
+                 "Extraction de l'archive (%u morceaux de 1 Go)…", parts);
+    else
+        set_msg("Extraction de l'archive…", NULL);
 
-    while (ok && remaining > 0 && zret != Z_STREAM_END)
-    {
-        if (inst.cancel)
-        {
-            ok = false;
-            break;
-        }
+    char name[128] = "";
+    zip_err_t err = zip_extract_rom(sf, out_path, name, sizeof(name),
+                                    on_zip_progress, NULL);
+    if (err != ZIP_OK)
+        return fail(zip_strerror(err));
 
-        size_t want = remaining < CHUNK ? remaining : CHUNK;
-        size_t got = fread(in_buf, 1, want, f);
-        if (got == 0)
-        {
-            ok = false;
-            break;
-        }
-        remaining -= got;
-
-        if (method == 0)
-        {
-            crc = crc32(crc, in_buf, got);
-            ok = fwrite(in_buf, 1, got, out) == got;
-            written += got;
-        }
-        else
-        {
-            zs.next_in = in_buf;
-            zs.avail_in = got;
-            do
-            {
-                zs.next_out = out_buf;
-                zs.avail_out = CHUNK;
-                zret = inflate(&zs, Z_NO_FLUSH);
-                if (zret != Z_OK && zret != Z_STREAM_END)
-                {
-                    ok = false;
-                    break;
-                }
-                size_t have = CHUNK - zs.avail_out;
-                crc = crc32(crc, out_buf, have);
-                if (fwrite(out_buf, 1, have, out) != have)
-                    ok = false;
-                written += have;
-            } while (ok && zs.avail_out == 0 && zret != Z_STREAM_END);
-        }
-
-        inst.now = written;
-        cothread_yield();
-    }
-
-    if (method == 8)
-        inflateEnd(&zs);
-    free(in_buf);
-    free(out_buf);
-    fclose(out);
-    fclose(f);
-
-    if (inst.cancel)
-        return fail("Installation annulée");
-    if (!ok || written != uncomp_size || crc != crc_expected)
-        return fail("Échec de l'extraction (archive corrompue ou SD pleine)");
-
+    snprintf(inst.name, sizeof(inst.name), "%s", name);
     return 0;
 }
 
@@ -713,7 +582,7 @@ static int do_install(void)
     inst.dest[0] = '\0';
 
     mkdir_p(inst.dir);
-    snprintf(inst.tmp, sizeof(inst.tmp), "%s/.dsishop_download.tmp", inst.dir);
+    snprintf(inst.tmp, sizeof(inst.tmp), "%s/.dsishop_download", inst.dir);
     snprintf(inst.tmp2, sizeof(inst.tmp2), "%s/.dsishop_extract.tmp", inst.dir);
 
     // 1. Lien GitHub -> URL du fichier de la dernière release
@@ -738,24 +607,43 @@ static int do_install(void)
     inst.state = INST_DOWNLOADING;
     set_msg("Téléchargement de %s…", inst.name);
 
-    FILE *f = fopen(inst.tmp, "wb");
-    if (!f)
+    // Le fichier est écrit en morceaux de 1 Go (.000, .001...) : un
+    // téléchargement de plus de 4 Go passe donc sur une SD en FAT32.
+    sfile_t sf;
+    if (!sfile_open_write(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT))
         return fail("Impossible d'écrire sur la carte SD");
-    setvbuf(f, NULL, _IOFBF, 32 * 1024);
-    int ret = http_get(inst.url, false, f, NULL);
-    if (fclose(f) != 0 && ret == 0)
-        return fail("Erreur d'écriture sur la carte SD");
+    int ret = http_get(inst.url, false, &sf, NULL);
+    bool write_ok = sfile_close(&sf);
     if (ret != 0)
         return -1;
+    if (!write_ok)
+        return fail("Erreur d'écriture sur la carte SD (pleine ?)");
 
-    // 3. Archive : on extrait la ROM
-    const char *rom = inst.tmp;
-    if (is_zip(inst.tmp))
+    if (!sfile_open_read(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT))
+        return fail("Fichier téléchargé introuvable sur la carte SD");
+
+    // 3. Archive : on extrait la ROM (ZIP64 géré pour les archives > 4 Go)
+    char first_part[260];
+    sfile_part_path(inst.tmp, 0, first_part, sizeof(first_part));
+    const char *rom = first_part;
+
+    if (is_zip(&sf))
     {
-        if (extract_zip(inst.tmp, inst.tmp2) != 0)
+        ret = extract_zip(&sf, inst.tmp2);
+        sfile_close(&sf);
+        if (ret != 0)
             return -1;
-        remove(inst.tmp);
+        sfile_remove(inst.tmp); // Libère la place prise par l'archive
         rom = inst.tmp2;
+    }
+    else
+    {
+        unsigned int parts = sfile_part_count(&sf);
+        sfile_close(&sf);
+        // Une ROM DS/DSi fait au plus 512 Mo : elle tient dans un seul morceau
+        if (parts > 1)
+            return fail("Ce fichier fait plus de 1 Go et n'est pas une archive "
+                        ".zip : ce n'est pas une ROM DS/DSi (512 Mo maximum)");
     }
 
     // 4. Vérification de la ROM
@@ -782,7 +670,7 @@ static int do_install(void)
     if (rename(rom, inst.dest) != 0)
         return fail("Impossible de renommer le fichier sur la carte SD");
 
-    remove(inst.tmp);
+    sfile_remove(inst.tmp);
     remove(inst.tmp2);
 
     set_msg("%s", "Installation terminée");
@@ -797,7 +685,7 @@ static int install_thread(void *arg)
     if (ret != 0)
     {
         // Nettoie les fichiers temporaires en cas d'échec
-        remove(inst.tmp);
+        sfile_remove(inst.tmp);
         remove(inst.tmp2);
     }
     return ret;
@@ -881,5 +769,5 @@ const char *installer_message(void) { return inst.msg; }
 const char *installer_file_name(void) { return inst.name; }
 const char *installer_release(void) { return inst.release; }
 const char *installer_dest_path(void) { return inst.dest; }
-size_t installer_progress_now(void) { return inst.now; }
-size_t installer_progress_total(void) { return inst.total; }
+uint64_t installer_progress_now(void) { return inst.now; }
+uint64_t installer_progress_total(void) { return inst.total; }

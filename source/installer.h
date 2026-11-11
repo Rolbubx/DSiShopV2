@@ -1,11 +1,13 @@
 // Installation de jeux/homebrews depuis un lien GitHub ou une URL directe :
-// téléchargement HTTPS (libcurl + Mbed TLS), extraction des .zip,
+// téléchargement HTTPS (libcurl + Mbed TLS) découpé en morceaux de 1 Go (pour
+// dépasser la limite de 4 Go du FAT32), extraction des .zip (ZIP64 compris),
 // vérification de l'en-tête de la ROM et copie sur la carte SD.
 #ifndef INSTALLER_H__
 #define INSTALLER_H__
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum {
     INST_IDLE,
@@ -36,7 +38,7 @@ const char *installer_message(void);   // Étape en cours ou message d'erreur
 const char *installer_file_name(void); // Nom du fichier installé / en cours
 const char *installer_release(void);   // Tag de la release GitHub (ou "")
 const char *installer_dest_path(void); // Chemin final sur la SD
-size_t installer_progress_now(void);   // Octets traités
-size_t installer_progress_total(void); // Total (0 si inconnu)
+uint64_t installer_progress_now(void);   // Octets traités (64 bits : > 4 Go)
+uint64_t installer_progress_total(void); // Total (0 si inconnu)
 
 #endif // INSTALLER_H__

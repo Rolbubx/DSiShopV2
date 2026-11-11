@@ -115,21 +115,21 @@ static bool net_busy(void)
            install_busy();
 }
 
-// "1,4 Mo", "820 Ko"...
-static void format_size(char *out, size_t size, size_t bytes)
+// "4,2 Go", "1,4 Mo", "820 Ko"...
+static void format_size(char *out, size_t size, uint64_t bytes)
 {
-    if (bytes >= 1024 * 1024)
-    {
-        unsigned int tenths = (unsigned int)((bytes * 10) / (1024 * 1024));
-        snprintf(out, size, "%u,%u Mo", tenths / 10, tenths % 10);
-    }
+    const uint64_t KB = 1024, MB = KB * 1024, GB = MB * 1024;
+    if (bytes >= GB)
+        snprintf(out, size, "%u,%u Go", (unsigned)(bytes / GB),
+                 (unsigned)((bytes % GB) * 10 / GB));
+    else if (bytes >= MB)
+        snprintf(out, size, "%u,%u Mo", (unsigned)(bytes / MB),
+                 (unsigned)((bytes % MB) * 10 / MB));
     else
-    {
-        snprintf(out, size, "%u Ko", (unsigned int)((bytes + 1023) / 1024));
-    }
+        snprintf(out, size, "%u Ko", (unsigned)((bytes + KB - 1) / KB));
 }
 
-static void draw_progress_bar(canvas_t *c, rect_t r, size_t now, size_t total)
+static void draw_progress_bar(canvas_t *c, rect_t r, uint64_t now, uint64_t total)
 {
     gfx_fill_round_rect(c, r.x, r.y, r.w, r.h, r.h / 2, COL_PANEL);
     if (total > 0)
@@ -414,7 +414,7 @@ static void draw_top(canvas_t *c)
                 { INST_VERIFYING, "Vérification et copie sur la SD" },
             };
 
-            int y = r.y + 8;
+            int y = r.y + 6;
             for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++)
             {
                 int cy = y + font_body.height / 2;
@@ -435,12 +435,12 @@ static void draw_top(canvas_t *c)
                     gfx_fill_circle(c, r.x + 14, cy, 3, COL_BORDER);
                 }
                 gfx_text(c, &font_body, r.x + 28, y, steps[i].label, col);
-                y += font_body.height + 4;
+                y += font_body.height + 1;
             }
 
-            y += 4;
+            y += 3;
             gfx_hline(c, r.x + 8, y, r.w - 16, COL_BORDER);
-            y += 6;
+            y += 4;
 
             char line[192];
             if (installer_file_name()[0])
@@ -455,6 +455,18 @@ static void draw_top(canvas_t *c)
                 snprintf(line, sizeof(line), "Release : %s", installer_release());
                 gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
                              COL_TEXT_DIM);
+                y += font_small.height + 2;
+            }
+
+            // Gros fichiers : stockés en morceaux de 1 Go (limite FAT32 : 4 Go)
+            const uint64_t GB = 1024ull * 1024 * 1024;
+            uint64_t total = installer_progress_total();
+            if (st == INST_DOWNLOADING && total > GB)
+            {
+                snprintf(line, sizeof(line), "Découpé en %u morceaux de 1 Go sur la SD",
+                         (unsigned)((total + GB - 1) / GB));
+                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                             COL_ACCENT);
             }
             break;
         }

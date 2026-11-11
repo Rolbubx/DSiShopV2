@@ -7,7 +7,7 @@
 
 static inst_state_t state = INST_IDLE;
 static int timer;
-static size_t now, total;
+static uint64_t now, total;
 static char msg[128] = "";
 
 void installer_sim_tick(void);
@@ -39,16 +39,16 @@ void installer_sim_tick(void)
     if (timer == 30)
     {
         state = INST_DOWNLOADING;
-        total = 2400 * 1024;
+        total = 6764573491ull; // ~6,3 Go : archive découpée en morceaux
         snprintf(msg, sizeof(msg), "Téléchargement de MonJeu-v1.2.zip…");
     }
     if (state == INST_DOWNLOADING)
-        now = total * (size_t)(timer - 30) / 120;
+        now = total * (uint64_t)(timer - 30) / 120;
     if (timer == 150)
     {
         state = INST_EXTRACTING;
         now = 0;
-        snprintf(msg, sizeof(msg), "Extraction de l'archive…");
+        snprintf(msg, sizeof(msg), "Extraction de l'archive (7 morceaux de 1 Go)…");
     }
     if (timer == 180)
     {
@@ -70,5 +70,5 @@ const char *installer_file_name(void)
 }
 const char *installer_release(void) { return "v1.2.0"; }
 const char *installer_dest_path(void) { return "sd:/roms/nds/MonJeu.nds"; }
-size_t installer_progress_now(void) { return now; }
-size_t installer_progress_total(void) { return state == INST_DOWNLOADING ? total : 0; }
+uint64_t installer_progress_now(void) { return now; }
+uint64_t installer_progress_total(void) { return state == INST_DOWNLOADING ? total : 0; }
