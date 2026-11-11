@@ -57,9 +57,32 @@ static struct {
     bool no_space;
     uint64_t space_needed, space_free;
 
+    // En-têtes HTTP du dernier téléchargement (pour détecter les mises à jour)
+    char etag[80];
+    char modified[40];
+    bool file_transfer;    // La requête en cours écrit dans un fichier
+
+    // Mise à jour d'un jeu existant
+    bool updating;
+    bool up_to_date;       // Résultat : la version installée était la dernière
+    game_t target;
+
+    // Vérification des mises à jour de tous les jeux
+    volatile bool checking;
+    int check_done, check_total;
+
     cothread_t thread;
     bool thread_alive;
 } inst;
+
+// Résultats de la vérification des mises à jour, par fichier
+static struct {
+    char file[128];
+    upd_status_t status;
+    char latest[64];
+} upd[GAMES_MAX];
+static int nupd;
+static game_t check_list[GAMES_MAX];
 
 // ---------------------------------------------------------------------------
 // Utilitaires
@@ -242,6 +265,40 @@ static size_t write_file(char *ptr, size_t size, size_t nmemb, void *userdata)
     return sfile_write((sfile_t *)userdata, ptr, size * nmemb);
 }
 
+// Récupère ETag et Last-Modified (de la dernière réponse, après redirections)
+static size_t header_cb(char *buf, size_t size, size_t nitems, void *ud)
+{
+    (void)ud;
+    size_t len = size * nitems;
+    char line[256];
+    size_t n = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+    memcpy(line, buf, n);
+    line[n] = '\0';
+    line[strcspn(line, "\r\n")] = '\0';
+
+    if (strncmp(line, "HTTP/", 5) == 0)
+    {
+        // Nouvelle réponse (redirection) : on oublie les en-têtes précédents
+        inst.etag[0] = '\0';
+        inst.modified[0] = '\0';
+    }
+    else if (strncasecmp(line, "etag:", 5) == 0)
+    {
+        const char *v = line + 5;
+        while (*v == ' ')
+            v++;
+        snprintf(inst.etag, sizeof(inst.etag), "%s", v);
+    }
+    else if (strncasecmp(line, "last-modified:", 14) == 0)
+    {
+        const char *v = line + 14;
+        while (*v == ' ')
+            v++;
+        snprintf(inst.modified, sizeof(inst.modified), "%s", v);
+    }
+    return len;
+}
+
 static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
                        curl_off_t ultotal, curl_off_t ulnow)
 {
@@ -252,7 +309,7 @@ static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
         return 1;
 
     // Dès que la taille est connue, on vérifie qu'il y a la place sur la SD
-    if (!inst.space_checked && dltotal > 0)
+    if (inst.file_transfer && !inst.space_checked && dltotal > 0)
     {
         inst.space_checked = true;
         uint64_t avail;
@@ -298,12 +355,18 @@ uint64_t installer_free_space(void)
     return avail;
 }
 
-// Effectue un GET. Écrit dans un fichier (file != NULL) ou en mémoire.
-static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *mem)
+// Effectue une requête. Écrit dans un fichier (file != NULL), en mémoire
+// (mem != NULL), ou rien (requête HEAD). En cas d'erreur, renvoie -1 et met
+// un message lisible dans err (sans toucher à l'état de l'installation).
+static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *mem,
+                    char *err, size_t err_size)
 {
     CURL *curl = curl_easy_init();
     if (!curl)
-        return fail("Erreur interne : curl_easy_init()");
+    {
+        snprintf(err, err_size, "Erreur interne : curl_easy_init()");
+        return -1;
+    }
 
     struct curl_slist *headers = NULL;
     if (github_api)
@@ -326,7 +389,16 @@ static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *m
 
     installer_setup_tls(curl);
 
-    if (file)
+    inst.etag[0] = '\0';
+    inst.modified[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    inst.file_transfer = file != NULL;
+
+    if (!file && !mem)
+    {
+        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // HEAD
+    }
+    else if (file)
     {
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
@@ -353,7 +425,7 @@ static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *m
     if (res == CURLE_OK)
         return 0;
 
-    char buf[160];
+#define ERR(...) do { snprintf(err, err_size, __VA_ARGS__); return -1; } while (0)
     switch (res)
     {
         case CURLE_ABORTED_BY_CALLBACK:
@@ -362,36 +434,45 @@ static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *m
                 char need[24], have[24];
                 format_size(need, sizeof(need), inst.space_needed);
                 format_size(have, sizeof(have), inst.space_free);
-                snprintf(buf, sizeof(buf), "Pas assez de place sur la carte SD : "
-                         "il faut %s, il reste %s", need, have);
-                return fail(buf);
+                ERR("Pas assez de place sur la carte SD : il faut %s, il reste %s",
+                    need, have);
             }
-            return fail("Installation annulée");
+            ERR("Opération annulée");
         case CURLE_COULDNT_RESOLVE_HOST:
-            return fail("Serveur introuvable (DNS). Vérifie le lien et la connexion.");
+            ERR("Serveur introuvable (DNS). Vérifie le lien et la connexion.");
         case CURLE_COULDNT_CONNECT:
-            return fail("Impossible de joindre le serveur");
+            ERR("Impossible de joindre le serveur");
         case CURLE_OPERATION_TIMEDOUT:
-            return fail("Le serveur ne répond plus (délai dépassé)");
+            ERR("Le serveur ne répond plus (délai dépassé)");
         case CURLE_PEER_FAILED_VERIFICATION:
         case CURLE_SSL_CACERT_BADFILE:
-            return fail("Certificat HTTPS refusé. Vérifie la date et l'heure de "
-                        "la console dans les paramètres système.");
+            ERR("Certificat HTTPS refusé. Vérifie la date et l'heure de la "
+                "console dans les paramètres système.");
         case CURLE_WRITE_ERROR:
-            return fail(file ? "Impossible d'écrire sur la carte SD (pleine ?)"
-                             : "Réponse du serveur trop volumineuse");
+            ERR("%s", file ? "Impossible d'écrire sur la carte SD (pleine ?)"
+                           : "Réponse du serveur trop volumineuse");
         case CURLE_HTTP_RETURNED_ERROR:
             if (code == 404)
-                return fail(github_api ? "Projet introuvable, ou aucune release publiée"
-                                       : "Fichier introuvable (erreur 404)");
+                ERR("%s", github_api ? "Projet introuvable, ou aucune release publiée"
+                                     : "Fichier introuvable (erreur 404)");
             if (code == 403 && github_api)
-                return fail("GitHub limite les requêtes : réessaie dans une heure");
-            snprintf(buf, sizeof(buf), "Le serveur a répondu avec l'erreur HTTP %ld", code);
-            return fail(buf);
+                ERR("GitHub limite les requêtes : réessaie dans une heure");
+            ERR("Le serveur a répondu avec l'erreur HTTP %ld", code);
         default:
-            snprintf(buf, sizeof(buf), "Erreur réseau : %s", curl_easy_strerror(res));
-            return fail(buf);
+            ERR("Erreur réseau : %s", curl_easy_strerror(res));
     }
+#undef ERR
+}
+
+// Version pour l'installation : une erreur fait échouer l'installation
+static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *mem)
+{
+    char err[192];
+    if (http_req(url, github_api, file, mem, err, sizeof(err)) == 0)
+        return 0;
+    if (inst.cancel && !inst.no_space)
+        return fail("Installation annulée");
+    return fail(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -509,16 +590,41 @@ static const char *json_string_after(const char *pos, const char *key,
     return *p ? p + 1 : p;
 }
 
-// Choisit le meilleur fichier de la release : .nds > .dsi > .zip
-static int pick_asset(const char *json)
+// Lien vers un fichier de release ("github.com/a/b/releases/download/v1/x.nds") :
+// renvoie l'API de la dernière release du même projet, pour les mises à jour
+static bool github_repo_of_download(const char *url, char *api_url, size_t size)
 {
-    static const char *const exts[] = { ".nds", ".dsi", ".zip" };
+    const char *p = strstr(url, "github.com/");
+    if (!p)
+        return false;
+    p += 11;
+    const char *dl = strstr(p, "/releases/download/");
+    if (!dl)
+        return false;
+    // p..dl = "auteur/projet"
+    const char *slash = memchr(p, '/', dl - p);
+    if (!slash || slash == p || slash + 1 >= dl || (dl - p) > 150)
+        return false;
+    snprintf(api_url, size, "https://api.github.com/repos/%.*s/releases/latest",
+             (int)(dl - p), p);
+    return true;
+}
+
+// Choisit le meilleur fichier de la release : extension préférée d'abord
+// (celle de la version installée, lors d'une mise à jour), puis .nds > .dsi > .zip
+static bool pick_asset(const char *json, const char *prefer_ext, char *tag,
+                       size_t tag_size, char *url_out, size_t url_size,
+                       char *name_out, size_t name_size)
+{
+    const char *exts[4] = { prefer_ext, ".nds", ".dsi", ".zip" };
     char url[512];
 
-    json_string_after(json, "\"tag_name\"", inst.release, sizeof(inst.release));
+    json_string_after(json, "\"tag_name\"", tag, tag_size);
 
-    for (size_t e = 0; e < sizeof(exts) / sizeof(exts[0]); e++)
+    for (size_t e = 0; e < 4; e++)
     {
+        if (!exts[e] || !exts[e][0])
+            continue;
         const char *pos = json;
         while ((pos = json_string_after(pos, "\"browser_download_url\"", url,
                                         sizeof(url))) != NULL)
@@ -527,32 +633,99 @@ static int pick_asset(const char *json)
             basename_from_url(url, name, sizeof(name));
             if (ends_with_ci(name, exts[e]))
             {
-                snprintf(inst.url, sizeof(inst.url), "%s", url);
-                snprintf(inst.name, sizeof(inst.name), "%s", name);
-                return 0;
+                snprintf(url_out, url_size, "%s", url);
+                snprintf(name_out, name_size, "%s", name);
+                return true;
             }
         }
     }
-
-    return fail("La release ne contient aucun fichier .nds, .dsi ou .zip");
+    return false;
 }
 
-static int resolve_github(const char *api_url)
+// Interroge l'API GitHub : tag + fichier à télécharger. -1 et err si échec.
+static int github_latest(const char *api_url, const char *prefer_ext, char *tag,
+                         size_t tag_size, char *url, size_t url_size, char *name,
+                         size_t name_size, char *err, size_t err_size)
+{
+    membuf_t mem = { .data = malloc(JSON_MAX), .len = 0, .cap = JSON_MAX };
+    if (!mem.data)
+    {
+        snprintf(err, err_size, "Mémoire insuffisante");
+        return -1;
+    }
+    mem.data[0] = '\0';
+
+    int ret = http_req(api_url, true, NULL, &mem, err, err_size);
+    if (ret == 0 && !pick_asset(mem.data, prefer_ext, tag, tag_size, url, url_size,
+                                name, name_size))
+    {
+        snprintf(err, err_size, "La release ne contient aucun fichier .nds, .dsi ou .zip");
+        ret = -1;
+    }
+    free(mem.data);
+    return ret;
+}
+
+static int resolve_github(const char *api_url, const char *prefer_ext)
 {
     inst.state = INST_RESOLVING;
     set_msg("Recherche de la dernière release sur GitHub…", NULL);
 
-    membuf_t mem = { .data = malloc(JSON_MAX), .len = 0, .cap = JSON_MAX };
-    if (!mem.data)
-        return fail("Mémoire insuffisante");
-    mem.data[0] = '\0';
+    char err[192];
+    if (github_latest(api_url, prefer_ext, inst.release, sizeof(inst.release),
+                      inst.url, sizeof(inst.url), inst.name, sizeof(inst.name),
+                      err, sizeof(err)) != 0)
+        return fail(inst.cancel ? "Installation annulée" : err);
+    return 0;
+}
 
-    int ret = http_get(api_url, true, NULL, &mem);
-    if (ret == 0)
-        ret = pick_asset(mem.data);
+// Extension (".zip"...) du fichier pointé par une URL
+static void url_ext(const char *url, char *out, size_t size)
+{
+    char name[128];
+    basename_from_url(url, name, sizeof(name));
+    const char *dot = strrchr(name, '.');
+    snprintf(out, size, "%s", dot ? dot : "");
+}
 
-    free(mem.data);
-    return ret;
+// Compare deux fichiers octet par octet
+static bool same_content(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    bool same = fa && fb;
+    static uint8_t ba[8192], bb[8192];
+    while (same)
+    {
+        size_t na = fread(ba, 1, sizeof(ba), fa);
+        size_t nb = fread(bb, 1, sizeof(bb), fb);
+        if (na != nb || memcmp(ba, bb, na) != 0)
+            same = false;
+        if (na == 0)
+            break;
+        cothread_yield();
+    }
+    if (fa)
+        fclose(fa);
+    if (fb)
+        fclose(fb);
+    return same;
+}
+
+static void set_update_result(const char *file, upd_status_t st, const char *latest)
+{
+    int i;
+    for (i = 0; i < nupd; i++)
+        if (strcmp(upd[i].file, file) == 0)
+            break;
+    if (i == nupd)
+    {
+        if (nupd >= GAMES_MAX)
+            return;
+        nupd++;
+    }
+    snprintf(upd[i].file, sizeof(upd[i].file), "%s", file);
+    upd[i].status = st;
+    snprintf(upd[i].latest, sizeof(upd[i].latest), "%s", latest ? latest : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -599,17 +772,70 @@ static int do_install(void)
     inst.release[0] = '\0';
     inst.name[0] = '\0';
     inst.dest[0] = '\0';
+    inst.up_to_date = false;
 
     mkdir_p(inst.dir);
     snprintf(inst.tmp, sizeof(inst.tmp), "%s/.dsishop_download", inst.dir);
     snprintf(inst.tmp2, sizeof(inst.tmp2), "%s/.dsishop_extract.tmp", inst.dir);
 
     // 1. Lien GitHub -> URL du fichier de la dernière release
+    //    (pour une mise à jour, un lien vers un fichier de release GitHub
+    //    renvoie aussi vers la dernière release du projet)
     char api_url[320];
-    if (parse_github(inst.link, api_url, sizeof(api_url)))
+    char prefer_ext[16] = "";
+    if (inst.updating)
+        url_ext(inst.target.url[0] ? inst.target.url : inst.link, prefer_ext,
+                sizeof(prefer_ext));
+
+    bool github = parse_github(inst.link, api_url, sizeof(api_url)) ||
+                  (inst.updating &&
+                   (github_repo_of_download(inst.link, api_url, sizeof(api_url)) ||
+                    github_repo_of_download(inst.target.url, api_url, sizeof(api_url))));
+
+    if (github)
     {
-        if (resolve_github(api_url) != 0)
+        if (resolve_github(api_url, prefer_ext) != 0)
             return -1;
+
+        // Même release que celle installée : rien à faire
+        if (inst.updating && inst.target.version[0] &&
+            strcmp(inst.release, inst.target.version) == 0)
+        {
+            snprintf(inst.name, sizeof(inst.name), "%s", inst.target.file);
+            inst.up_to_date = true;
+            set_update_result(inst.target.file, UPD_UP_TO_DATE, inst.release);
+            set_msg("%s est déjà à jour", inst.target.file);
+            inst.state = INST_DONE;
+            return 0;
+        }
+    }
+    else if (inst.updating)
+    {
+        // Lien direct : on demande juste les en-têtes (HEAD) au serveur
+        snprintf(inst.url, sizeof(inst.url), "%s",
+                 inst.target.url[0] ? inst.target.url : inst.link);
+        basename_from_url(inst.url, inst.name, sizeof(inst.name));
+        inst.state = INST_RESOLVING;
+        set_msg("Recherche d'une nouvelle version…", NULL);
+
+        char err[192];
+        if (http_req(inst.url, false, NULL, NULL, err, sizeof(err)) != 0)
+            return fail(inst.cancel ? "Mise à jour annulée" : err);
+
+        bool same = (inst.target.etag[0] && strcmp(inst.etag, inst.target.etag) == 0) ||
+                    (!inst.etag[0] && inst.target.modified[0] &&
+                     strcmp(inst.modified, inst.target.modified) == 0);
+        if (same)
+        {
+            snprintf(inst.name, sizeof(inst.name), "%s", inst.target.file);
+            inst.up_to_date = true;
+            set_update_result(inst.target.file, UPD_UP_TO_DATE, "");
+            set_msg("%s est déjà à jour", inst.target.file);
+            inst.state = INST_DONE;
+            return 0;
+        }
+        // Sinon (fichier changé, ou serveur sans ETag ni date) : on télécharge,
+        // et on comparera le contenu à la fin
     }
     else
     {
@@ -683,19 +909,66 @@ static int do_install(void)
         strcat(inst.name, ".nds");
     }
 
-    // 5. Mise en place (remplace l'ancienne version)
+    // Infos du téléchargement à retenir (avant toute autre requête)
+    game_t rec;
+    memset(&rec, 0, sizeof(rec));
+    snprintf(rec.source, sizeof(rec.source), "%s", inst.link);
+    snprintf(rec.version, sizeof(rec.version), "%s", inst.release);
+    snprintf(rec.url, sizeof(rec.url), "%s", inst.url);
+    snprintf(rec.etag, sizeof(rec.etag), "%s", inst.etag);
+    snprintf(rec.modified, sizeof(rec.modified), "%s", inst.modified);
+
+    // Mise à jour : on garde exactement le même nom de fichier, pour que les
+    // sauvegardes (rattachées au nom de la ROM) continuent de fonctionner
+    if (inst.updating)
+        snprintf(inst.name, sizeof(inst.name), "%s", inst.target.file);
+    snprintf(rec.file, sizeof(rec.file), "%s", inst.name);
     snprintf(inst.dest, sizeof(inst.dest), "%s/%s", inst.dir, inst.name);
-    remove(inst.dest);
+
+    if (inst.updating && same_content(rom, inst.dest))
+    {
+        // Le serveur ne disait pas si le fichier avait changé : il n'a pas changé
+        sfile_remove(inst.tmp);
+        remove(inst.tmp2);
+        games_record(inst.dir, &rec);
+        inst.up_to_date = true;
+        set_update_result(inst.name, UPD_UP_TO_DATE, inst.release);
+        set_msg("%s est déjà à jour", inst.name);
+        inst.state = INST_DONE;
+        return 0;
+    }
+
+    // 5. Mise en place. Lors d'une mise à jour, l'ancienne version est gardée
+    //    de côté (.dsishop_old) pour pouvoir revenir en arrière.
+    if (inst.updating)
+    {
+        if (!games_backup(inst.dir, inst.name))
+            return fail("Impossible de mettre l'ancienne version de côté");
+    }
+    else
+    {
+        remove(inst.dest);
+    }
+
     if (rename(rom, inst.dest) != 0)
+    {
+        if (inst.updating)
+            games_restore_backup(inst.dir, inst.name); // Remet l'ancienne
         return fail("Impossible de renommer le fichier sur la carte SD");
+    }
 
     sfile_remove(inst.tmp);
     remove(inst.tmp2);
 
-    // Retient d'où vient le jeu (affiché dans "Mes jeux" et sur le Remote)
-    games_record(inst.dir, inst.name, inst.link, inst.release);
+    // Retient d'où vient le jeu et l'adresse exacte du téléchargement
+    // (affichés dans "Mes jeux" et sur le Remote, utilisés pour les mises à jour)
+    if (inst.updating && inst.target.source[0])
+        snprintf(rec.source, sizeof(rec.source), "%s", inst.target.source);
+    games_record(inst.dir, &rec);
+    set_update_result(inst.name, UPD_UP_TO_DATE, inst.release);
 
-    set_msg("%s", "Installation terminée");
+    set_msg("%s", inst.updating ? "Mise à jour terminée (sauvegardes conservées)"
+                                : "Installation terminée");
     inst.state = INST_DONE;
     return 0;
 }
@@ -750,13 +1023,21 @@ bool installer_was_remote(void)
     return inst.remote;
 }
 
-bool installer_start_ex(const char *link, bool remote)
+static bool start_thread(void)
 {
-    if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
+    // TLS + curl ont besoin d'une pile confortable
+    inst.thread = cothread_create(install_thread, NULL, 128 * 1024, 0);
+    if (inst.thread < 0)
+    {
+        fail("Impossible de créer la tâche d'installation");
         return false;
-    if (!inst.storage_ok || !inst.curl_ok)
-        return false;
+    }
+    inst.thread_alive = true;
+    return true;
+}
 
+static bool free_thread_slot(void)
+{
     if (inst.thread_alive)
     {
         if (!cothread_has_joined(inst.thread))
@@ -764,7 +1045,48 @@ bool installer_start_ex(const char *link, bool remote)
         cothread_delete(inst.thread);
         inst.thread_alive = false;
     }
+    return true;
+}
 
+static bool can_start(void)
+{
+    if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
+        return false;
+    if (inst.checking || !inst.storage_ok || !inst.curl_ok)
+        return false;
+    return free_thread_slot();
+}
+
+static bool installer_start_link(const char *link, bool remote);
+
+bool installer_start_ex(const char *link, bool remote)
+{
+    if (!can_start())
+        return false;
+    inst.updating = false;
+    return installer_start_link(link, remote);
+}
+
+bool installer_update(const char *file, bool remote)
+{
+    if (!can_start() || !games_valid_name(file))
+        return false;
+
+    game_t g;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s", inst.dir, file);
+    if (!file_exists(path) || !games_get_record(inst.dir, file, &g) ||
+        !games_is_tracked(&g))
+        return false;
+
+    inst.target = g;
+    inst.updating = true;
+    return installer_start_link(g.source[0] ? g.source : g.url, remote);
+}
+
+// Partie commune : lien nettoyé, puis lancement de la tâche
+static bool installer_start_link(const char *link, bool remote)
+{
     // Retire les espaces autour du lien
     while (*link == ' ')
         link++;
@@ -780,21 +1102,137 @@ bool installer_start_ex(const char *link, bool remote)
     inst.now = inst.total = 0;
     inst.state = INST_RESOLVING;
     set_msg("Préparation…", NULL);
+    return start_thread();
+}
 
-    // TLS + curl ont besoin d'une pile confortable
-    inst.thread = cothread_create(install_thread, NULL, 128 * 1024, 0);
+void installer_cancel(void)
+{
+    inst.cancel = true;
+}
+
+// ---------------------------------------------------------------------------
+// Vérification des mises à jour de tous les jeux
+// ---------------------------------------------------------------------------
+
+static upd_status_t check_one(const game_t *g, char *latest, size_t latest_size,
+                              bool *rate_limited)
+{
+    latest[0] = '\0';
+    if (!games_is_tracked(g))
+        return UPD_NOT_TRACKED;
+
+    const char *link = g->source[0] ? g->source : g->url;
+    char api_url[320], err[192];
+
+    if (parse_github(link, api_url, sizeof(api_url)) ||
+        github_repo_of_download(link, api_url, sizeof(api_url)) ||
+        github_repo_of_download(g->url, api_url, sizeof(api_url)))
+    {
+        char ext[16], url[512], name[128];
+        url_ext(g->url, ext, sizeof(ext));
+        if (github_latest(api_url, ext, latest, latest_size, url, sizeof(url), name,
+                          sizeof(name), err, sizeof(err)) != 0)
+        {
+            if (strstr(err, "limite"))
+                *rate_limited = true;
+            return UPD_ERROR;
+        }
+        // Version installée inconnue (ex. après un retour en arrière)
+        if (!g->version[0])
+            return UPD_AVAILABLE;
+        return strcmp(latest, g->version) == 0 ? UPD_UP_TO_DATE : UPD_AVAILABLE;
+    }
+
+    // Lien direct : en-têtes seulement
+    if (http_req(g->url[0] ? g->url : link, false, NULL, NULL, err, sizeof(err)) != 0)
+        return UPD_ERROR;
+    if (g->etag[0] && inst.etag[0])
+        return strcmp(g->etag, inst.etag) == 0 ? UPD_UP_TO_DATE : UPD_AVAILABLE;
+    if (g->modified[0] && inst.modified[0])
+        return strcmp(g->modified, inst.modified) == 0 ? UPD_UP_TO_DATE : UPD_AVAILABLE;
+    return UPD_UNKNOWN; // Le serveur ne le dit pas : il faudra télécharger
+}
+
+static int check_thread(void *arg)
+{
+    (void)arg;
+    bool rate_limited = false;
+
+    for (int i = 0; i < inst.check_total && !inst.cancel; i++)
+    {
+        const game_t *g = &check_list[i];
+        char latest[64] = "";
+        upd_status_t st = rate_limited ? UPD_ERROR
+                                       : check_one(g, latest, sizeof(latest), &rate_limited);
+        set_update_result(g->file, st, latest);
+        inst.check_done = i + 1;
+        cothread_yield();
+    }
+
+    inst.checking = false;
+    return 0;
+}
+
+bool installer_check_updates(const game_t *games, int count)
+{
+    if (!can_start())
+        return false;
+    if (count > GAMES_MAX)
+        count = GAMES_MAX;
+
+    memcpy(check_list, games, sizeof(game_t) * count);
+    inst.check_total = count;
+    inst.check_done = 0;
+    for (int i = 0; i < count; i++)
+        set_update_result(games[i].file, UPD_CHECKING, "");
+
+    inst.cancel = false;
+    inst.checking = true;
+    inst.thread = cothread_create(check_thread, NULL, 128 * 1024, 0);
     if (inst.thread < 0)
     {
-        fail("Impossible de créer la tâche d'installation");
+        inst.checking = false;
         return false;
     }
     inst.thread_alive = true;
     return true;
 }
 
-void installer_cancel(void)
+bool installer_checking(void)
 {
-    inst.cancel = true;
+    return inst.checking;
+}
+
+void installer_check_progress(int *done, int *total)
+{
+    *done = inst.check_done;
+    *total = inst.check_total;
+}
+
+upd_status_t installer_update_status(const char *file, const char **latest)
+{
+    for (int i = 0; i < nupd; i++)
+    {
+        if (strcmp(upd[i].file, file) == 0)
+        {
+            if (latest)
+                *latest = upd[i].latest;
+            return upd[i].status;
+        }
+    }
+    if (latest)
+        *latest = "";
+    return UPD_UNKNOWN;
+}
+
+bool installer_last_was_update(void)
+{
+    return inst.updating;
+}
+
+bool installer_up_to_date(void)
+{
+    return inst.up_to_date;
 }
 
 inst_state_t installer_state(void) { return inst.state; }

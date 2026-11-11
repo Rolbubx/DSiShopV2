@@ -351,6 +351,7 @@ async function deviceApi(req, res, route) {
             st.games.push({
               file: clean(f[1], 128), size: Number(f[2]) || 0,
               source: clean(f[3], 300), version: clean(f[4], 64),
+              url: clean(f[5], 320),
             });
           }
           break;
@@ -389,17 +390,21 @@ function deviceView(d) {
   };
 }
 
+// Nom de ROM sans dossier (la DSi revérifie de son côté)
+function romName(arg) {
+  const f = String(arg || '');
+  if (!/^[^/\\\t\r\n]{1,128}\.(nds|dsi)$/i.test(f) || f.includes('..')) return null;
+  return f;
+}
+
 const COMMANDS = {
   install: (arg) => {
     const link = String(arg || '').trim();
     if (!link || link.length > 300 || /[\t\r\n\s]/.test(link)) return null;
     return link;
   },
-  uninstall: (arg) => {
-    const f = String(arg || '');
-    if (!/^[^/\\\t\r\n]{1,128}\.(nds|dsi)$/i.test(f)) return null;
-    return f;
-  },
+  uninstall: (arg) => romName(arg),
+  update: (arg) => romName(arg),
   cancel: () => '',
   reboot: () => '',
   refresh: () => '',

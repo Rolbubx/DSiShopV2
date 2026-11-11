@@ -403,6 +403,18 @@ static void run_command(const rcmd_t *c)
                 add_ack(c->id, false, "Jeu introuvable sur la carte SD");
             break;
 
+        case RCMD_UPDATE:
+            if (installer_busy() || installer_checking())
+                add_ack(c->id, false, "Une installation est déjà en cours");
+            else if (installer_update(c->arg, true))
+            {
+                add_ack(c->id, true, "Mise à jour lancée");
+                push_event(REMOTE_EV_INSTALL_STARTED);
+            }
+            else
+                add_ack(c->id, false, "Jeu introuvable ou installé à la main");
+            break;
+
         case RCMD_CANCEL:
             installer_cancel();
             add_ack(c->id, true, installer_busy() ? "Annulation demandée" : "Rien à annuler");

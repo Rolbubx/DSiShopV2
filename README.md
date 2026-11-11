@@ -10,8 +10,11 @@ Application homebrew pour **Nintendo DSi** (une appli, pas un jeu), écrite en C
 - **Menu principal** au lancement : deux grandes tuiles **Installer un jeu** et
   **Remote**, plus des raccourcis *Jeux*, *Wi-Fi* et *Plus…* (test Internet, à
   propos, quitter). La DSi se connecte toute seule aux réseaux Wi-Fi enregistrés.
-- **Mes jeux** : liste des `.nds` / `.dsi` installés (taille, version et source
-  pour ceux installés par DSi Shop), avec **désinstallation** après confirmation.
+- **Mes jeux** : liste des `.nds` / `.dsi` installés. Chaque jeu a sa fiche : version,
+  source, **adresse exacte du téléchargement**, sauvegardes trouvées. Depuis la fiche :
+  **mettre à jour**, **revenir à la version précédente**, **supprimer les
+  sauvegardes**, **désinstaller**. Le bouton *Vérifier les màj* contrôle tous les jeux
+  d'un coup.
 - **Remote** : la DSi affiche un **QR code**. Tu le scannes avec ton téléphone, tu te
   connectes avec ton **compte Google**, et tu pilotes la DSi depuis le site :
   installer, chercher sur GitHub, désinstaller, annuler, redémarrer. Ça nécessite le
@@ -142,6 +145,34 @@ Formats de lien acceptés :
   propre bundle dans `sd:/_dsishop/cacert.pem`, il remplacera celui qui est embarqué.
 - L'API GitHub sans compte est limitée à 60 requêtes par heure et par adresse IP.
 
+## Mises à jour des jeux
+
+À chaque installation, DSi Shop retient dans `sd:/roms/nds/.dsishop.tsv` le lien
+saisi, la release (tag GitHub), **l'adresse exacte du fichier téléchargé**, et les
+en-têtes `ETag` / `Last-Modified` du serveur.
+
+Pour vérifier s'il y a du nouveau :
+- **projet GitHub** (ou fichier de release GitHub) : comparaison du tag de la
+  dernière release avec celui installé ;
+- **lien direct** : requête `HEAD`, comparaison de l'ETag ou de la date. Si le
+  serveur ne donne ni l'un ni l'autre, le fichier est téléchargé et comparé octet
+  par octet à la version installée.
+
+Pendant une mise à jour :
+1. la nouvelle version est téléchargée et vérifiée **avant** de toucher à l'ancienne
+   (une mise à jour ratée ne casse rien) ;
+2. elle garde **exactement le même nom de fichier**, même si la release a renommé le
+   sien : les sauvegardes (`Jeu.sav`, rattachées au nom de la ROM) restent donc
+   associées au jeu ;
+3. l'ancienne version est déplacée dans `sd:/roms/nds/.dsishop_old/`, d'où le bouton
+   **Revenir à la version précédente**.
+
+Si le jeu plante après une mise à jour, **Supprimer les sauvegardes** efface
+`Jeu.sav`, `.sav1`-`.sav9`, `.pub`, `.prv` et `.bak`, à côté de la ROM ou dans
+`saves/` (le dossier par défaut de TWiLight Menu++), après confirmation. Les jeux qui
+rangent leurs données ailleurs (leur propre dossier sur la SD) ne sont pas concernés.
+La désinstallation garde les sauvegardes, pour les retrouver si tu réinstalles.
+
 ## Remote : mise en route
 
 1. Héberge le serveur : voir [`remote-server/README.md`](remote-server/README.md)
@@ -157,6 +188,20 @@ Le jeton secret de la DSi est stocké dans `sd:/_dsishop/remote.cfg`. Le bouton
 Les installations lancées depuis le téléphone ne redémarrent pas la console
 automatiquement, pour pouvoir en enchaîner plusieurs. Le bouton *Redémarrer la DSi*
 du site s'en charge.
+
+### Pourquoi un serveur, et pas la DSi elle-même ?
+
+La DSi pourrait servir une petite page web sur ton réseau local (le Wi-Fi le
+permet). Mais la **connexion Google** est impossible dans ce cas :
+- Google n'accepte la connexion que depuis un site **public en HTTPS** déclaré dans
+  la console Google. Une adresse locale comme `http://192.168.1.42` est refusée ;
+- la DSi n'aurait pas de certificat HTTPS valide pour son adresse locale ;
+- elle ne serait joignable que depuis le même Wi-Fi, et seulement quand elle est
+  allumée sur DSi Shop.
+
+Un mode « Remote local » sans compte Google est possible (le QR code pointerait
+vers la DSi, protégé par un code secret affiché à l'écran), mais il ne marcherait
+qu'à la maison, sur le même Wi-Fi.
 
 ## Ajouter un écran
 

@@ -97,19 +97,37 @@ static void fake_rom(const char *name, size_t size)
         fclose(f);
 }
 
+static void record(const char *file, const char *source, const char *version,
+                   const char *url)
+{
+    game_t g = { 0 };
+    snprintf(g.file, sizeof(g.file), "%s", file);
+    snprintf(g.source, sizeof(g.source), "%s", source);
+    snprintf(g.version, sizeof(g.version), "%s", version);
+    snprintf(g.url, sizeof(g.url), "%s", url);
+    games_record(sim_games_dir, &g);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : ".";
 
-    // Dossier de jeux factice (vrais fichiers : la liste et la
-    // désinstallation passent par games.c, comme sur la console)
+    // Dossier de jeux factice (vrais fichiers : la liste, les mises à jour et
+    // les sauvegardes passent par games.c, comme sur la console)
     snprintf(sim_games_dir, sizeof(sim_games_dir), "%s/roms", dir);
     mkdir(sim_games_dir, 0777);
+    char saves[600];
+    snprintf(saves, sizeof(saves), "%s/saves", sim_games_dir);
+    mkdir(saves, 0777);
     fake_rom("Pong.nds", 131072);
+    fake_rom("Pong.sav", 512);
+    fake_rom("saves/Pong.sav", 512);
     fake_rom("Tetris DS Remix.dsi", 4718592);
     fake_rom("Zelda Homebrew.nds", 9437184);
-    games_record(sim_games_dir, "Pong.nds", "github.com/auteur/pong", "v1.0.3");
-    games_record(sim_games_dir, "Zelda Homebrew.nds", "github.com/x/zelda", "v0.9");
+    record("Pong.nds", "github.com/auteur/pong", "v1.0.3",
+           "https://github.com/auteur/pong/releases/download/v1.0.3/pong.nds");
+    record("Zelda Homebrew.nds", "https://exemple.fr/zelda.zip", "",
+           "https://exemple.fr/zelda.zip");
 
     gfx_init();
     app_init(net_init());
@@ -130,37 +148,54 @@ int main(int argc, char **argv)
     save(dir, "02_remote_qr");
     remote_sim_pair("Alice", "alice@example.com");
     frames(3);
-    save(dir, "03_remote_connecte");
     press(BTN_B);
     frames(2);
 
     // Installer un jeu
     tap(66, 78);
     frames(2);
-    save(dir, "04_installer");
     tap(128, 113);
     frames(90);
-    save(dir, "05_telechargement");
+    save(dir, "03_telechargement");
     frames(110);
-    save(dir, "06_installe");
     tap(128, 108 + 36 + 15);   // Plus tard
     frames(2);
 
-    // Onglet "Mes jeux" puis désinstallation
+    // Mes jeux -> vérifier les mises à jour
     tap(188, 36);
     frames(2);
-    save(dir, "07_mes_jeux");
-    tap(100, 52 + 16);
-    frames(2);
-    save(dir, "08_desinstaller");
-    tap(128, 119);
-    frames(3);
-    save(dir, "09_apres_desinstallation");
+    tap(94, SCREEN_H - 17);
+    frames(15);
+    save(dir, "04_verification");
+    frames(40);
+    save(dir, "05_mises_a_jour");
 
-    press(BTN_B);
+    // Fiche de Pong (mise à jour disponible)
+    tap(100, 52 + 36 + 16);
     frames(2);
-    tap(210, 147);   // Plus…
+    save(dir, "06_fiche_jeu");
+
+    // Mettre à jour
+    tap(128, 44 + 12);
+    frames(90);
+    save(dir, "07_maj_en_cours");
+    frames(110);
+    save(dir, "08_maj_terminee");
+    tap(128, 108 + 36 + 15);   // Plus tard
     frames(2);
-    save(dir, "10_plus");
+
+    // Retour sur la fiche : version précédente disponible, sauvegardes gardées
+    tap(188, 36);
+    frames(2);
+    tap(100, 52 + 36 + 16);
+    frames(2);
+    save(dir, "09_fiche_apres_maj");
+
+    // Supprimer les sauvegardes (confirmation)
+    tap(128, 44 + 2 * 28 + 12);
+    frames(2);
+    save(dir, "10_supprimer_sauvegardes");
+    tap(128, 106 + 15);
+    frames(3);
     return 0;
 }

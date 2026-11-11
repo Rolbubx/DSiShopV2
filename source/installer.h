@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "games.h"
+
 typedef enum {
     INST_IDLE,
     INST_RESOLVING,    // Interrogation de l'API GitHub
@@ -35,6 +37,40 @@ bool installer_start(const char *link);
 bool installer_start_ex(const char *link, bool remote);
 bool installer_was_remote(void);
 void installer_cancel(void);
+
+// ---------------------------------------------------------------------------
+// Mises à jour
+// ---------------------------------------------------------------------------
+//
+// Projet GitHub (ou fichier de release GitHub) : compare le tag de la dernière
+// release avec celui installé. Lien direct : compare l'ETag / la date
+// (requête HEAD), et à défaut le contenu du fichier téléchargé.
+// La nouvelle version garde exactement le même nom de fichier, donc les
+// sauvegardes (.sav) restent associées au jeu. L'ancienne version est gardée
+// dans .dsishop_old pour pouvoir revenir en arrière.
+
+typedef enum {
+    UPD_UNKNOWN,      // Pas encore vérifié
+    UPD_CHECKING,
+    UPD_NOT_TRACKED,  // Installé à la main : on ne sait pas d'où il vient
+    UPD_UP_TO_DATE,
+    UPD_AVAILABLE,
+    UPD_ERROR,
+} upd_status_t;
+
+// Met à jour un jeu (même déroulement qu'une installation, en arrière-plan).
+// À la fin : état INST_DONE, et installer_up_to_date() dit s'il n'y avait rien
+// de nouveau.
+bool installer_update(const char *file, bool remote);
+bool installer_last_was_update(void);
+bool installer_up_to_date(void);
+
+// Vérifie s'il existe des mises à jour pour tous ces jeux (en arrière-plan)
+bool installer_check_updates(const game_t *games, int count);
+bool installer_checking(void);
+void installer_check_progress(int *done, int *total);
+// Résultat pour un jeu (latest : version disponible, peut être vide)
+upd_status_t installer_update_status(const char *file, const char **latest);
 
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);

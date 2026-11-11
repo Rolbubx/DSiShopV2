@@ -217,20 +217,28 @@ function render() {
   // Jeux
   const games = st.games || [];
   $('#games-count').textContent = games.length ? '(' + games.length + ')' : '';
-  $('#games').replaceChildren(...(games.length ? games.map((g) => el('li', {},
+  $('#games').replaceChildren(...(games.length ? games.map((g) => el('li', { class: 'game' },
     el('div', { class: 'grow' },
       el('div', { class: 'title' }, g.file),
-      el('div', { class: 'sub' }, [formatSize(g.size), g.version, g.source].filter(Boolean).join(' · '))),
-    el('button', {
-      class: 'danger',
-      onclick: () => {
-        if (confirm('Désinstaller « ' + g.file + ' » de la DSi ?')) sendCommand('uninstall', g.file);
-      },
-    }, 'Désinstaller'))) : [el('li', { class: 'muted' }, d.status ? 'Aucun jeu installé.' : 'La DSi n’a pas encore envoyé sa liste.')]));
+      el('div', { class: 'sub' }, [formatSize(g.size), g.version, g.source].filter(Boolean).join(' · ')),
+      g.url ? el('div', { class: 'sub url' }, 'Téléchargé depuis : ' + g.url) : null),
+    el('div', { class: 'btns' },
+      (g.source || g.url) ? el('button', {
+        class: 'secondary',
+        onclick: () => sendCommand('update', g.file),
+      }, 'Mettre à jour') : null,
+      el('button', {
+        class: 'danger',
+        onclick: () => {
+          if (confirm('Désinstaller « ' + g.file + ' » de la DSi ? (les sauvegardes sont gardées)')) {
+            sendCommand('uninstall', g.file);
+          }
+        },
+      }, 'Désinstaller')))) : [el('li', { class: 'muted' }, d.status ? 'Aucun jeu installé.' : 'La DSi n’a pas encore envoyé sa liste.')]));
 
   // Historique
   const labels = { queued: 'en attente', sent: 'envoyée', ok: 'OK', error: 'erreur' };
-  const names = { install: 'Installer', uninstall: 'Désinstaller', cancel: 'Annuler', reboot: 'Redémarrer', refresh: 'Actualiser' };
+  const names = { install: 'Installer', uninstall: 'Désinstaller', update: 'Mettre à jour', cancel: 'Annuler', reboot: 'Redémarrer', refresh: 'Actualiser' };
   $('#history').replaceChildren(...(d.history.length ? d.history.map((h) => el('li', {},
     el('div', { class: 'grow' }, (names[h.type] || h.type) + (h.arg ? ' ' + h.arg : ''),
       h.result ? el('div', { class: 'sub' }, h.result) : null),

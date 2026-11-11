@@ -4,6 +4,8 @@
 //   pair  \t <code> \t <url> \t <durée en s>
 //   device\t <id> \t <jeton>
 //   cmd   \t <id> \t <type> \t <argument>
+// La DSi envoie aussi, pour chaque jeu :
+//   game  \t <fichier> \t <taille> \t <source> \t <version> \t <url>
 //   error \t <message>
 // Portable : testé sur PC dans tools/test.
 #ifndef REMOTE_PROTO_H__
@@ -19,6 +21,7 @@ typedef enum {
     RCMD_UNKNOWN,
     RCMD_INSTALL,    // arg = lien
     RCMD_UNINSTALL,  // arg = nom du fichier
+    RCMD_UPDATE,     // arg = nom du fichier
     RCMD_CANCEL,
     RCMD_REBOOT,
     RCMD_REFRESH,

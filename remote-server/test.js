@@ -84,6 +84,11 @@ test('parcours complet : enregistrement, appairage, commande, statut', async () 
     { type: 'uninstall', arg: '../../boot.nds' }, cookie)).status, 400);
   assert.equal((await web('POST', `devices/${deviceId}/commands`,
     { type: 'install', arg: 'a b' }, cookie)).status, 400);
+  assert.equal((await web('POST', `devices/${deviceId}/commands`,
+    { type: 'update', arg: 'x/../y.nds' }, cookie)).status, 400);
+  assert.equal((await web('POST', `devices/${deviceId}/commands`,
+    { type: 'update', arg: 'Pong.nds' }, cookie)).status, 200);
+  await dev('GET', 'poll?wait=0', token); // Vide la file
 
   // Le long poll se réveille dès qu'une commande arrive
   const waiting = dev('GET', 'poll?wait=20', token);
@@ -104,7 +109,8 @@ test('parcours complet : enregistrement, appairage, commande, statut', async () 
   // 6. La DSi envoie son statut + l'acquittement
   const status = [
     'state\tdownloading', 'message\tTéléchargement de jeu.zip…', 'progress\t1048576\t4194304',
-    'game\tPong.nds\t131072\tgithub.com/a/pong\tv1.0', 'game\tTetris.dsi\t262144\t\t',
+    'game\tPong.nds\t131072\tgithub.com/a/pong\tv1.0\thttps://github.com/a/pong/releases/download/v1.0/pong.nds',
+    'game\tTetris.dsi\t262144\t\t',
     `ack\t${cmd.json.command.id}\tok\tInstallation lancée`, 'free\t1000000',
   ].join('\n');
   assert.equal((await dev('POST', 'status', token, status)).status, 200);
@@ -115,6 +121,7 @@ test('parcours complet : enregistrement, appairage, commande, statut', async () 
   assert.deepEqual(view.status.progress, { now: 1048576, total: 4194304 });
   assert.equal(view.status.games.length, 2);
   assert.equal(view.status.games[0].version, 'v1.0');
+  assert.equal(view.status.games[0].url, 'https://github.com/a/pong/releases/download/v1.0/pong.nds');
   assert.equal(view.history[0].state, 'ok');
   assert.equal(view.history[0].result, 'Installation lancée');
 

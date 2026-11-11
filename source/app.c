@@ -28,10 +28,18 @@ typedef enum {
     SCREEN_INSTALL,       // Saisie du lien + progression
     SCREEN_URL,           // Clavier pour taper le lien
     SCREEN_INSTALL_DONE,  // Installé : compte à rebours avant redémarrage
-    SCREEN_UNINSTALL,     // Confirmation de désinstallation
+    SCREEN_GAME,          // Fiche d'un jeu : mise à jour, sauvegardes...
+    SCREEN_CONFIRM,       // Confirmation (désinstaller, effacer les sauvegardes...)
     SCREEN_REMOTE,        // QR code pour piloter la DSi depuis un téléphone
     SCREEN_MORE,          // Test Internet, À propos, Quitter
 } app_screen_t;
+
+// Actions qui demandent une confirmation
+typedef enum {
+    CONFIRM_UNINSTALL,
+    CONFIRM_DELETE_SAVES,
+    CONFIRM_RESTORE,
+} confirm_t;
 
 // Onglets de l'écran "Installer un jeu"
 enum { TAB_INSTALL, TAB_GAMES };
@@ -66,7 +74,10 @@ static struct {
     int ngames;
     bool games_loaded;
     int games_scroll;
-    game_t to_uninstall;
+    game_t sel;           // Jeu affiché dans la fiche
+    int sel_saves;        // Nombre de fichiers de sauvegarde trouvés
+    bool sel_backup;      // Une version précédente est disponible
+    confirm_t confirm;
 
     // QR code du Remote (recalculé seulement si l'URL change)
     char qr_text[200];
@@ -490,30 +501,50 @@ static void draw_top(canvas_t *c)
             break;
         }
 
-        case SCREEN_UNINSTALL:
+        case SCREEN_GAME:
+        case SCREEN_CONFIRM:
         {
-            const game_t *g = &app.to_uninstall;
-            gfx_text(c, &font_title, 12, 30, "Désinstaller", COL_TEXT);
+            const game_t *g = &app.sel;
+            gfx_text(c, &font_title, 12, 30, "Fiche du jeu", COL_TEXT);
             rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
             ui_panel(c, r);
-            int y = r.y + 8;
-            gfx_text_box(c, &font_body, r.x + 8, y, r.w - 16, ALIGN_LEFT, g->file, COL_TEXT);
-            y += font_body.height + 4;
-            char line[320], size[24];
+            int x = r.x + 8, w = r.w - 16, y = r.y + 6;
+            int bottom = r.y + r.h - 4;
+            char line[420], size[24];
+
             format_size(size, sizeof(size), g->size);
-            snprintf(line, sizeof(line), "Taille : %s", size);
-            gfx_text(c, &font_small, r.x + 8, y, line, COL_TEXT_DIM);
+            snprintf(line, sizeof(line), "%s · %s", g->version[0] ? g->version : "version inconnue",
+                     size);
+            gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT);
             y += font_small.height + 2;
-            snprintf(line, sizeof(line), "Version : %s", g->version[0] ? g->version : "inconnue");
-            gfx_text(c, &font_small, r.x + 8, y, line, COL_TEXT_DIM);
+
+            if (games_is_tracked(g))
+            {
+                snprintf(line, sizeof(line), "Source : %s", g->source[0] ? g->source : g->url);
+                gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+                y += font_small.height + 2;
+                snprintf(line, sizeof(line), "Téléchargé depuis : %s",
+                         g->url[0] ? g->url : "(non retenu)");
+                y += gfx_text_wrap(c, &font_small, x, y, w, font_small.height * 3, line,
+                                   COL_TEXT_DIM);
+            }
+            else
+            {
+                y += gfx_text_wrap(c, &font_small, x, y, w, font_small.height * 2,
+                                   "Installé à la main : DSi Shop ne connaît pas "
+                                   "son adresse de téléchargement.", COL_TEXT_DIM);
+            }
+
+            y += 2;
+            snprintf(line, sizeof(line), "Sauvegardes : %d fichier(s)%s", app.sel_saves,
+                     app.sel_saves ? " (gardées pendant les mises à jour)" : "");
+            if (y + font_small.height <= bottom)
+                gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
             y += font_small.height + 2;
-            snprintf(line, sizeof(line), "Source : %s",
-                     g->source[0] ? g->source : "installé à la main");
-            y += gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16,
-                               font_small.height * 2, line, COL_TEXT_DIM);
-            snprintf(line, sizeof(line), "Fichier : %s/%s", installer_dir(), g->file);
-            gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16, font_small.height * 2,
-                          line, COL_TEXT_OFF);
+            snprintf(line, sizeof(line), "Version précédente : %s",
+                     app.sel_backup ? "disponible" : "aucune");
+            if (y + font_small.height <= bottom)
+                gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
             break;
         }
 
@@ -759,7 +790,9 @@ static void draw_top(canvas_t *c)
 
         case SCREEN_INSTALL_DONE:
         {
-            gfx_text(c, &font_title, 12, 30, "C'est installé !", COL_OK);
+            gfx_text(c, &font_title, 12, 30,
+                     installer_last_was_update() ? "C'est à jour !" : "C'est installé !",
+                     COL_OK);
             rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
             ui_panel(c, r);
 
@@ -782,9 +815,14 @@ static void draw_top(canvas_t *c)
                                font_small.height * 2, line, COL_TEXT_DIM);
             y += 8;
 
-            snprintf(line, sizeof(line), "La console redémarre dans %d s. "
-                     "Le jeu apparaîtra dans ton menu (TWiLight Menu++…).",
-                     reboot_seconds_left());
+            if (installer_last_was_update())
+                snprintf(line, sizeof(line), "Tes sauvegardes sont conservées. "
+                         "L'ancienne version est gardée de côté au cas où. "
+                         "Redémarrage dans %d s.", reboot_seconds_left());
+            else
+                snprintf(line, sizeof(line), "La console redémarre dans %d s. "
+                         "Le jeu apparaîtra dans ton menu (TWiLight Menu++…).",
+                         reboot_seconds_left());
             gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16, r.y + r.h - y - 4,
                           line, COL_TEXT);
             break;
@@ -831,6 +869,13 @@ static uint32_t top_signature(void)
     if (app.screen == SCREEN_INSTALL_DONE)
         MIX(reboot_seconds_left());
     MIX(time(NULL) / 60);
+    MIX(installer_checking());
+    if (installer_checking())
+    {
+        int done, total;
+        installer_check_progress(&done, &total);
+        MIX(done);
+    }
     MIX(remote_state());
     MIX(strlen(remote_status_text()));
     MIX(strlen(remote_owner_name()));
@@ -1238,6 +1283,40 @@ static void screen_http(canvas_t *c, const input_t *in)
                      "Connecte-toi d'abord au Wi-Fi", COL_WARN);
 }
 
+// Ouvre la fiche d'un jeu (recalcule sauvegardes et version précédente)
+static void open_game(const game_t *g)
+{
+    app.sel = *g;
+    app.sel_saves = games_find_saves(installer_dir(), g->file, NULL, 0);
+    app.sel_backup = games_has_backup(installer_dir(), g->file);
+    go(SCREEN_GAME);
+}
+
+// Recharge la fiche du jeu affiché (après une mise à jour par exemple)
+static void reload_selected(void)
+{
+    for (int i = 0; i < app.ngames; i++)
+        if (strcmp(app.games[i].file, app.sel.file) == 0)
+            app.sel = app.games[i];
+    app.sel_saves = games_find_saves(installer_dir(), app.sel.file, NULL, 0);
+    app.sel_backup = games_has_backup(installer_dir(), app.sel.file);
+}
+
+static const char *update_label(const game_t *g, uint16_t *color)
+{
+    const char *latest;
+    upd_status_t st = installer_update_status(g->file, &latest);
+    *color = COL_TEXT_DIM;
+    switch (st)
+    {
+        case UPD_CHECKING:   return "…";
+        case UPD_AVAILABLE:  *color = COL_WARN; return "Màj !";
+        case UPD_UP_TO_DATE: *color = COL_OK;   return "À jour";
+        case UPD_ERROR:      *color = COL_ERR;  return "?";
+        default:             (void)g; return "";
+    }
+}
+
 #define GAMES_Y     52
 #define GAME_ROW_H  32
 #define GAME_ROWS   3
@@ -1284,10 +1363,11 @@ static void screen_games(canvas_t *c, const input_t *in)
 
         rect_t r = RECT(8, GAMES_Y + row * (GAME_ROW_H + 4), SCREEN_W - 16 - 12,
                         GAME_ROW_H);
-        if (ui_list_item(c, r, g->file, sub, "Suppr.", COL_ERR))
+        uint16_t col;
+        const char *badge = update_label(g, &col);
+        if (ui_list_item(c, r, g->file, sub, badge, col))
         {
-            app.to_uninstall = *g;
-            go(SCREEN_UNINSTALL);
+            open_game(g);
             return;
         }
     }
@@ -1301,16 +1381,34 @@ static void screen_games(canvas_t *c, const input_t *in)
         gfx_fill_round_rect(c, SCREEN_W - 12, thumb_y, 4, thumb_h, 2, COL_ACCENT);
     }
 
+    // Barre du bas : défilement, vérification des mises à jour, retour
     int by = SCREEN_H - 28;
-    int bw = (SCREEN_W - 16 - 8 * 2) / 3;
-    if (ui_button(c, RECT(8, by, bw, 22), "\xE2\x86\x91 L", BTN_STYLE_NORMAL,
+    if (ui_button(c, RECT(8, by, 30, 22), "\xE2\x86\x91", BTN_STYLE_NORMAL,
                   app.games_scroll > 0))
         app.games_scroll--;
-    if (ui_button(c, RECT(8 + bw + 8, by, bw, 22), "Retour", BTN_STYLE_NORMAL, true) ||
+
+    char check[40] = "Vérifier les màj";
+    bool checking = installer_checking();
+    if (checking)
+    {
+        int done, total;
+        installer_check_progress(&done, &total);
+        snprintf(check, sizeof(check), "Vérification %d/%d", done, total);
+    }
+    bool online = net_state() == NET_CONNECTED;
+    if (ui_button(c, RECT(42, by, 104, 22), check, BTN_STYLE_PRIMARY,
+                  !checking && online && app.ngames > 0 && !install_busy()) ||
+        ((in->down & BTN_Y) && online && !checking && !install_busy()))
+    {
+        if (!installer_check_updates(app.games, app.ngames))
+            ui_toast("Impossible de vérifier maintenant");
+    }
+
+    if (ui_button(c, RECT(150, by, 64, 22), "Retour", BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
         go(SCREEN_HOME);
-    if (ui_button(c, RECT(8 + (bw + 8) * 2, by, bw, 22), "R \xE2\x86\x93",
-                  BTN_STYLE_NORMAL, app.games_scroll < max_scroll))
+    if (ui_button(c, RECT(218, by, 30, 22), "\xE2\x86\x93", BTN_STYLE_NORMAL,
+                  app.games_scroll < max_scroll))
         app.games_scroll++;
 }
 
@@ -1413,40 +1511,167 @@ static void screen_install(canvas_t *c, const input_t *in)
     }
 }
 
-static void screen_uninstall(canvas_t *c, const input_t *in)
+static void back_to_games(void)
 {
-    ui_header(c, "Désinstaller", NULL);
+    refresh_games();
+    app.install_tab = TAB_GAMES;
+    go(SCREEN_INSTALL);
+}
 
-    const game_t *g = &app.to_uninstall;
-    gfx_text_box(c, &font_body, 12, 34, SCREEN_W - 24, ALIGN_CENTER, g->file, COL_TEXT);
-    gfx_text_wrap(c, &font_small, 20, 56, SCREEN_W - 40, 50,
-                  "Le jeu sera supprimé de la carte SD. Tu pourras le "
-                  "réinstaller plus tard.", COL_TEXT_DIM);
+static void screen_game(canvas_t *c, const input_t *in)
+{
+    const game_t *g = &app.sel;
+    ui_header(c, g->file, NULL);
 
-    if (ui_button(c, RECT(BTN_X0, 104, BTN_W, BTN_H), "Désinstaller",
-                  BTN_STYLE_DANGER, !install_busy()))
+    bool busy = install_busy() || installer_checking();
+    bool online = net_state() == NET_CONNECTED;
+    bool tracked = games_is_tracked(g);
+
+    // Ligne d'état de la mise à jour
+    const char *latest;
+    upd_status_t st = installer_update_status(g->file, &latest);
+    char line[128];
+    uint16_t col = COL_TEXT_DIM;
+    if (!tracked)
+        snprintf(line, sizeof(line), "Installé à la main : pas de mise à jour auto");
+    else if (st == UPD_AVAILABLE)
     {
-        if (games_uninstall(installer_dir(), g->file))
-        {
-            refresh_games();
-            app.install_tab = TAB_GAMES;
-            go(SCREEN_INSTALL);
-            ui_toast("Jeu désinstallé");
-        }
-        else
-        {
-            ui_toast("Impossible de supprimer le fichier");
-        }
+        snprintf(line, sizeof(line), "Nouvelle version disponible%s%s",
+                 latest[0] ? " : " : "", latest);
+        col = COL_WARN;
+    }
+    else if (st == UPD_UP_TO_DATE)
+    {
+        snprintf(line, sizeof(line), "À jour%s%s", g->version[0] ? " : " : "", g->version);
+        col = COL_OK;
+    }
+    else
+        snprintf(line, sizeof(line), "Version installée : %s",
+                 g->version[0] ? g->version : "inconnue");
+    gfx_text_box(c, &font_small, 10, 27, SCREEN_W - 20, ALIGN_LEFT, line, col);
+
+    const int x = BTN_X0, w = BTN_W, h = 24, gap = 4;
+    int y = 44;
+
+    if (ui_button(c, RECT(x, y, w, h), "Mettre à jour", BTN_STYLE_PRIMARY,
+                  tracked && online && !busy))
+    {
+        if (!installer_update(g->file, false))
+            ui_toast("Impossible de lancer la mise à jour");
         return;
     }
+    y += h + gap;
 
-    if (ui_button(c, RECT(BTN_X0, 104 + BTN_H + 6, BTN_W, BTN_H), "Annuler",
+    if (ui_button(c, RECT(x, y, w, h), "Revenir à la version précédente",
+                  BTN_STYLE_NORMAL, app.sel_backup && !busy))
+    {
+        app.confirm = CONFIRM_RESTORE;
+        go(SCREEN_CONFIRM);
+        return;
+    }
+    y += h + gap;
+
+    char saves[48];
+    snprintf(saves, sizeof(saves), "Supprimer les sauvegardes (%d)", app.sel_saves);
+    if (ui_button(c, RECT(x, y, w, h), saves, BTN_STYLE_DANGER,
+                  app.sel_saves > 0 && !busy))
+    {
+        app.confirm = CONFIRM_DELETE_SAVES;
+        go(SCREEN_CONFIRM);
+        return;
+    }
+    y += h + gap;
+
+    if (ui_button(c, RECT(x, y, w, h), "Désinstaller", BTN_STYLE_DANGER, !busy))
+    {
+        app.confirm = CONFIRM_UNINSTALL;
+        go(SCREEN_CONFIRM);
+        return;
+    }
+    y += h + gap;
+
+    if (ui_button(c, RECT(x, y, w, h), "Retour", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+        back_to_games();
+}
+
+static void screen_confirm(canvas_t *c, const input_t *in)
+{
+    const game_t *g = &app.sel;
+    const char *title = "", *text = "", *action = "";
+    btn_style_t style = BTN_STYLE_DANGER;
+
+    switch (app.confirm)
+    {
+        case CONFIRM_UNINSTALL:
+            title = "Désinstaller";
+            text = "Le jeu sera supprimé de la carte SD. Ses sauvegardes sont "
+                   "gardées : tu les retrouveras si tu le réinstalles.";
+            action = "Désinstaller";
+            break;
+        case CONFIRM_DELETE_SAVES:
+            title = "Supprimer les sauvegardes";
+            text = "Toutes les sauvegardes de ce jeu seront effacées. Utile si "
+                   "le jeu plante après une mise à jour. C'est définitif !";
+            action = "Effacer les sauvegardes";
+            break;
+        case CONFIRM_RESTORE:
+            title = "Version précédente";
+            text = "Le jeu revient à la version d'avant la dernière mise à jour. "
+                   "Les sauvegardes ne sont pas touchées.";
+            action = "Revenir en arrière";
+            style = BTN_STYLE_PRIMARY;
+            break;
+    }
+
+    ui_header(c, title, NULL);
+    gfx_text_box(c, &font_body, 12, 32, SCREEN_W - 24, ALIGN_CENTER, g->file, COL_TEXT);
+    gfx_text_wrap(c, &font_small, 20, 54, SCREEN_W - 40, 50, text, COL_TEXT_DIM);
+
+    if (ui_button(c, RECT(BTN_X0, 106, BTN_W, BTN_H), action, style, !install_busy()))
+    {
+        const char *dir = installer_dir();
+        char msg[96];
+        switch (app.confirm)
+        {
+            case CONFIRM_UNINSTALL:
+                if (games_uninstall(dir, g->file))
+                {
+                    back_to_games();
+                    ui_toast("Jeu désinstallé");
+                }
+                else
+                    ui_toast("Impossible de supprimer le fichier");
+                return;
+
+            case CONFIRM_DELETE_SAVES:
+            {
+                int n = games_delete_saves(dir, g->file);
+                snprintf(msg, sizeof(msg), "%d sauvegarde(s) supprimée(s)", n);
+                reload_selected();
+                go(SCREEN_GAME);
+                ui_toast(msg);
+                return;
+            }
+
+            case CONFIRM_RESTORE:
+                if (games_restore_backup(dir, g->file))
+                {
+                    refresh_games();
+                    reload_selected();
+                    go(SCREEN_GAME);
+                    ui_toast("Version précédente restaurée");
+                }
+                else
+                    ui_toast("Impossible de restaurer la version précédente");
+                return;
+        }
+    }
+
+    if (ui_button(c, RECT(BTN_X0, 106 + BTN_H + 6, BTN_W, BTN_H), "Annuler",
                   BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
-    {
-        app.install_tab = TAB_GAMES;
-        go(SCREEN_INSTALL);
-    }
+        go(SCREEN_GAME);
 }
 
 static void screen_url(canvas_t *c, const input_t *in)
@@ -1474,7 +1699,8 @@ static int reboot_seconds_left(void)
 
 static void screen_install_done(canvas_t *c, const input_t *in)
 {
-    ui_header(c, "Installation terminée", NULL);
+    ui_header(c, installer_last_was_update() ? "Mise à jour terminée"
+                                             : "Installation terminée", NULL);
 
     gfx_fill_circle(c, SCREEN_W / 2, 50, 14, COL_OK);
     draw_check(c, SCREEN_W / 2 - 1, 50, COL_BG);
@@ -1534,7 +1760,21 @@ static void handle_background_events(void)
             app.install_tab = TAB_INSTALL;
             go(SCREEN_INSTALL);
             if (installer_was_remote())
-                ui_toast("Installation demandée depuis le Remote");
+                ui_toast(installer_last_was_update() ? "Mise à jour demandée depuis le Remote"
+                                                     : "Installation demandée depuis le Remote");
+        }
+        else if (st == INST_DONE && installer_last_was_update() && installer_up_to_date())
+        {
+            // Rien de nouveau : on retourne à la fiche du jeu
+            refresh_games();
+            char msg[160];
+            snprintf(msg, sizeof(msg), "%s est déjà à jour", installer_file_name());
+            if (!installer_was_remote() && strcmp(app.sel.file, installer_file_name()) == 0)
+            {
+                reload_selected();
+                go(SCREEN_GAME);
+            }
+            ui_toast(msg);
         }
         else if (st == INST_DONE)
         {
@@ -1543,7 +1783,9 @@ static void handle_background_events(void)
             {
                 // Pas de redémarrage automatique : on peut en enchaîner plusieurs
                 char msg[160];
-                snprintf(msg, sizeof(msg), "Installé : %s", installer_file_name());
+                snprintf(msg, sizeof(msg), "%s : %s",
+                         installer_last_was_update() ? "Mis à jour" : "Installé",
+                         installer_file_name());
                 ui_toast(msg);
             }
             else
@@ -1554,7 +1796,8 @@ static void handle_background_events(void)
         }
         else if (st == INST_ERROR)
         {
-            ui_toast("Échec de l'installation");
+            ui_toast(installer_last_was_update() ? "Échec de la mise à jour"
+                                                 : "Échec de l'installation");
         }
         app.last_inst_state = st;
     }
@@ -1624,7 +1867,8 @@ void app_frame(const input_t *in)
             case SCREEN_INSTALL:  screen_install(c, in); break;
             case SCREEN_URL:      screen_url(c, in); break;
             case SCREEN_INSTALL_DONE: screen_install_done(c, in); break;
-            case SCREEN_UNINSTALL: screen_uninstall(c, in); break;
+            case SCREEN_GAME:     screen_game(c, in); break;
+            case SCREEN_CONFIRM:  screen_confirm(c, in); break;
             case SCREEN_REMOTE:   screen_remote(c, in); break;
             case SCREEN_MORE:     screen_more(c, in); break;
         }

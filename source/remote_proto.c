@@ -18,6 +18,7 @@ static rcmd_type_t cmd_type(const char *s)
 {
     if (strcmp(s, "install") == 0)   return RCMD_INSTALL;
     if (strcmp(s, "uninstall") == 0) return RCMD_UNINSTALL;
+    if (strcmp(s, "update") == 0)    return RCMD_UPDATE;
     if (strcmp(s, "cancel") == 0)    return RCMD_CANCEL;
     if (strcmp(s, "reboot") == 0)    return RCMD_REBOOT;
     if (strcmp(s, "refresh") == 0)   return RCMD_REFRESH;
@@ -179,6 +180,8 @@ size_t remote_build_status(char *buf, size_t cap, const rstatus_t *st,
         sb_field(&sb, games[i].source);
         sb_raw(&sb, "\t");
         sb_field(&sb, games[i].version);
+        sb_raw(&sb, "\t");
+        sb_field(&sb, games[i].url);
         sb_raw(&sb, "\n");
     }
 
