@@ -68,6 +68,10 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    // Le lanceur (fondu blanc de TWiLight Menu++) peut laisser la luminosité
+    // au blanc : sans ça, tout l'écran reste blanc sur une vraie DSi
+    setBrightness(3, 0);
+
     // Plantage : affiche les registres au lieu d'un écran figé
     defaultExceptionHandler();
 
