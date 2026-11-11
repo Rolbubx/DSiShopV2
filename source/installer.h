@@ -31,7 +31,15 @@ const char *installer_dir(void);
 //   auteur/projet
 //   https://exemple.com/jeu.nds (ou .dsi, .zip)
 bool installer_start(const char *link);
+// Pareil, en précisant si la demande vient du Remote (pas de redémarrage auto)
+bool installer_start_ex(const char *link, bool remote);
+bool installer_was_remote(void);
 void installer_cancel(void);
+
+// Configure la vérification HTTPS d'un handle libcurl (CURL *)
+void installer_setup_tls(void *curl);
+// Espace libre sur la carte SD en octets (0 si inconnu)
+uint64_t installer_free_space(void);
 
 inst_state_t installer_state(void);
 const char *installer_message(void);   // Étape en cours ou message d'erreur

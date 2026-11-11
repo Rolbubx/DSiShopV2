@@ -43,7 +43,11 @@ NITROFSDIR	:=
 # Defines passed to all files
 # ---------------------------
 
-DEFINES		:=
+# Adresse du serveur Remote (remote-server/), ex. :
+#   make REMOTE_SERVER=https://dsishop.mondomaine.fr
+# Peut aussi être mise dans sd:/_dsishop/server.txt sur la console.
+REMOTE_SERVER	?=
+DEFINES		:= -DREMOTE_SERVER=\"$(REMOTE_SERVER)\"
 
 # Libraries
 # ---------

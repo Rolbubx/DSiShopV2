@@ -8,3 +8,4 @@ image.bin
 tools/sim/dsishop_sim
 screenshots/
 tools/test/test_zip
+tools/test/test_remote

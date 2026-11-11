@@ -214,6 +214,13 @@ void net_get_info(net_info_t *info)
     addr_to_str(dns2, info->dns2);
 }
 
+bool net_has_saved_networks(void)
+{
+    if (net.state == NET_OFF)
+        return false;
+    return Wifi_GetData(WIFIGETDATA_NUMWFCAPS, 0, NULL) > 0;
+}
+
 void net_connect_saved(void)
 {
     if (net.state == NET_OFF)

@@ -20,10 +20,12 @@ static const net_ap_t fake_aps[] = {
 bool net_init(void) { return true; }
 
 void installer_sim_tick(void);
+void remote_sim_tick(void);
 
 void net_update(void)
 {
     installer_sim_tick();
+    remote_sim_tick();
     if (state == NET_CONNECTING && ++connect_timer > 90)
         state = NET_CONNECTED;
 }
@@ -55,6 +57,8 @@ void net_get_info(net_info_t *info)
     strcpy(info->dns1, "192.168.1.1");
     strcpy(info->dns2, "0.0.0.0");
 }
+
+bool net_has_saved_networks(void) { return true; }
 
 void net_connect_saved(void)
 {

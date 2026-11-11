@@ -15,6 +15,7 @@
 #include <nds.h>
 #include <zlib.h>
 
+#include "games.h"
 #include "installer.h"
 #include "splitfile.h"
 #include "zip.h"
@@ -36,6 +37,7 @@ static struct {
     bool storage_ok;
     bool curl_ok;
     volatile bool cancel;
+    bool remote;           // Lancée depuis le Remote (téléphone)
 
     char root[8];          // "sd:" ou "fat:"
     char dir[64];          // Dossier d'installation
@@ -266,6 +268,36 @@ static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
     return 0;
 }
 
+// Vérification des certificats HTTPS (on installe des exécutables !).
+// Aussi utilisé par le Remote (remote.c).
+void installer_setup_tls(void *handle)
+{
+    CURL *curl = handle;
+    // curl garde des pointeurs vers ces données : elles doivent rester valides
+    static char custom[64];
+    static struct curl_blob blob;
+
+    snprintf(custom, sizeof(custom), "%s%s", inst.root, CUSTOM_CACERT);
+    blob.data = (void *)cacert_pem;
+    blob.len = cacert_pem_size;
+    blob.flags = CURL_BLOB_NOCOPY;
+
+    if (file_exists(custom))
+        curl_easy_setopt(curl, CURLOPT_CAINFO, custom);
+    else
+        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+}
+
+uint64_t installer_free_space(void)
+{
+    uint64_t avail = 0;
+    if (!inst.storage_ok || !free_space(&avail))
+        return 0;
+    return avail;
+}
+
 // Effectue un GET. Écrit dans un fichier (file != NULL) ou en mémoire.
 static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *mem)
 {
@@ -292,20 +324,7 @@ static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *m
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_cb);
 
-    // Vérification des certificats HTTPS (on installe des exécutables !)
-    char custom[64];
-    snprintf(custom, sizeof(custom), "%s%s", inst.root, CUSTOM_CACERT);
-    struct curl_blob blob = {
-        .data = (void *)cacert_pem,
-        .len = cacert_pem_size,
-        .flags = CURL_BLOB_NOCOPY,
-    };
-    if (file_exists(custom))
-        curl_easy_setopt(curl, CURLOPT_CAINFO, custom);
-    else
-        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    installer_setup_tls(curl);
 
     if (file)
     {
@@ -673,6 +692,9 @@ static int do_install(void)
     sfile_remove(inst.tmp);
     remove(inst.tmp2);
 
+    // Retient d'où vient le jeu (affiché dans "Mes jeux" et sur le Remote)
+    games_record(inst.dir, inst.name, inst.link, inst.release);
+
     set_msg("%s", "Installation terminée");
     inst.state = INST_DONE;
     return 0;
@@ -720,6 +742,16 @@ const char *installer_dir(void)
 
 bool installer_start(const char *link)
 {
+    return installer_start_ex(link, false);
+}
+
+bool installer_was_remote(void)
+{
+    return inst.remote;
+}
+
+bool installer_start_ex(const char *link, bool remote)
+{
     if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
         return false;
     if (!inst.storage_ok || !inst.curl_ok)
@@ -744,6 +776,7 @@ bool installer_start(const char *link)
         return false;
 
     inst.cancel = false;
+    inst.remote = remote;
     inst.now = inst.total = 0;
     inst.state = INST_RESOLVING;
     set_msg("Préparation…", NULL);

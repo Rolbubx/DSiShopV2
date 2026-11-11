@@ -52,6 +52,8 @@ void net_get_info(net_info_t *info);
 
 // Connexion aux réseaux enregistrés dans les paramètres de la console
 void net_connect_saved(void);
+// Vrai si au moins un réseau est enregistré dans les paramètres de la console
+bool net_has_saved_networks(void);
 // Recherche de réseaux
 void net_scan_start(void);
 void net_scan_stop(void);

@@ -8,6 +8,7 @@
 #include "input.h"
 #include "installer.h"
 #include "net.h"
+#include "remote.h"
 
 static void read_input(input_t *in)
 {
@@ -44,7 +45,17 @@ int main(int argc, char **argv)
     // Carte SD (pour installer les jeux) puis Wi-Fi
     installer_init();
     bool wifi_ok = net_init();
+    remote_init();
     app_init(wifi_ok);
+
+    // Connexion automatique aux réseaux enregistrés dans la console
+    if (wifi_ok && net_has_saved_networks())
+        net_connect_saved();
+
+    // DSi déjà associée à un téléphone : le Remote démarre tout seul
+    // (il attend que le Wi-Fi soit connecté)
+    if (remote_has_device())
+        remote_start();
 
     input_t in = { 0 };
 

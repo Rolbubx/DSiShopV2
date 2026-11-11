@@ -5,10 +5,13 @@
 #include <time.h>
 
 #include "app.h"
+#include "games.h"
 #include "gfx.h"
 #include "installer.h"
 #include "keyboard.h"
 #include "net.h"
+#include "remote.h"
+#include "thirdparty/qrcodegen.h"
 #include "ui.h"
 
 // Serveur utilisé pour le test HTTP (texte clair, pas de HTTPS)
@@ -16,7 +19,7 @@
 #define TEST_PATH "/"
 
 typedef enum {
-    SCREEN_HOME,
+    SCREEN_HOME,          // Menu principal
     SCREEN_WIFI,
     SCREEN_SCAN,
     SCREEN_PASSWORD,
@@ -25,7 +28,16 @@ typedef enum {
     SCREEN_INSTALL,       // Saisie du lien + progression
     SCREEN_URL,           // Clavier pour taper le lien
     SCREEN_INSTALL_DONE,  // Installé : compte à rebours avant redémarrage
+    SCREEN_UNINSTALL,     // Confirmation de désinstallation
+    SCREEN_REMOTE,        // QR code pour piloter la DSi depuis un téléphone
+    SCREEN_MORE,          // Test Internet, À propos, Quitter
 } app_screen_t;
+
+// Onglets de l'écran "Installer un jeu"
+enum { TAB_INSTALL, TAB_GAMES };
+
+// Taille max d'un QR code (version 10 : URL jusqu'à ~170 caractères)
+#define QR_MAX_VERSION 10
 
 // Délai avant le redémarrage automatique après une installation
 #define REBOOT_DELAY_FRAMES (5 * 60)
@@ -48,6 +60,19 @@ static struct {
     unsigned int done_frame;
     inst_state_t last_inst_state;
 
+    // Jeux installés
+    int install_tab;
+    game_t games[GAMES_MAX];
+    int ngames;
+    bool games_loaded;
+    int games_scroll;
+    game_t to_uninstall;
+
+    // QR code du Remote (recalculé seulement si l'URL change)
+    char qr_text[200];
+    bool qr_ok;
+    uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
+
     // Pour ne redessiner l'écran du haut que si quelque chose a changé
     uint32_t top_signature;
     bool force_redraw;
@@ -68,6 +93,7 @@ void app_init(bool wifi_ok)
     app.wifi_ok = wifi_ok;
     app.top_signature = 0xFFFFFFFF;
     snprintf(app.url, sizeof(app.url), "github.com/");
+    app.last_inst_state = INST_IDLE;
     go(SCREEN_HOME);
 }
 
@@ -189,6 +215,163 @@ static void draw_text_field(canvas_t *c, rect_t f, const char *text,
 // Écran du haut
 // ---------------------------------------------------------------------------
 
+static void refresh_games(void)
+{
+    app.ngames = installer_storage_ok()
+                     ? games_scan(installer_dir(), app.games, GAMES_MAX)
+                     : 0;
+    app.games_loaded = true;
+    if (app.games_scroll > app.ngames)
+        app.games_scroll = 0;
+}
+
+// Dessine un QR code (fond blanc + zone de silence), centré dans la boîte
+static void draw_qr(canvas_t *c, rect_t box, const char *text)
+{
+    if (strcmp(text, app.qr_text) != 0)
+    {
+        uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
+        snprintf(app.qr_text, sizeof(app.qr_text), "%s", text);
+        app.qr_ok = qrcodegen_encodeText(text, tmp, app.qr, qrcodegen_Ecc_MEDIUM,
+                                         qrcodegen_VERSION_MIN, QR_MAX_VERSION,
+                                         qrcodegen_Mask_AUTO, true);
+    }
+    if (!app.qr_ok)
+        return;
+
+    const int quiet = 3; // Modules blancs autour (pour les lecteurs de QR)
+    int n = qrcodegen_getSize(app.qr);
+    int total = n + quiet * 2;
+    int max = box.w < box.h ? box.w : box.h;
+    int scale = max / total;
+    if (scale < 1)
+        scale = 1;
+    int px = total * scale;
+    int x0 = box.x + (box.w - px) / 2, y0 = box.y + (box.h - px) / 2;
+
+    const uint16_t white = COLOR_RGB(255, 255, 255), black = COLOR_RGB(0, 0, 0);
+    gfx_fill_round_rect(c, x0, y0, px, px, scale * 2, white);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++)
+            if (qrcodegen_getModule(app.qr, x, y))
+                gfx_fill_rect(c, x0 + (x + quiet) * scale, y0 + (y + quiet) * scale,
+                              scale, scale, black);
+}
+
+// Icônes des tuiles du menu principal (dessinées à la main)
+static void icon_download(canvas_t *c, int cx, int cy, uint16_t col)
+{
+    gfx_fill_rect(c, cx - 2, cy - 14, 5, 13, col);              // Tige
+    for (int i = 0; i < 7; i++)                                  // Pointe
+        gfx_hline(c, cx - 8 + i, cy - 2 + i, 17 - i * 2, col);
+    gfx_fill_rect(c, cx - 13, cy + 4, 3, 9, col);                // Bac
+    gfx_fill_rect(c, cx + 11, cy + 4, 3, 9, col);
+    gfx_fill_rect(c, cx - 13, cy + 11, 27, 3, col);
+}
+
+static void icon_qr(canvas_t *c, int cx, int cy, uint16_t col, uint16_t bg)
+{
+    // Trois "yeux" de QR code et quelques modules
+    const int s = 3;
+    const int eyes[3][2] = { { -15, -15 }, { 6, -15 }, { -15, 6 } };
+    for (int i = 0; i < 3; i++)
+    {
+        int x = cx + eyes[i][0], y = cy + eyes[i][1];
+        gfx_fill_rect(c, x, y, 3 * s, 3 * s, col);
+        gfx_fill_rect(c, x + 2, y + 2, 3 * s - 4, 3 * s - 4, bg);
+        gfx_fill_rect(c, x + 3, y + 3, 3, 3, col);
+    }
+    static const int8_t dots[][2] = {
+        { 1, 1 }, { 2, 3 }, { 4, 2 }, { 1, 5 }, { 3, 6 }, { 5, 4 }, { 6, 6 },
+        { 0, 3 }, { 5, 0 }, { 6, 2 },
+    };
+    for (size_t i = 0; i < sizeof(dots) / sizeof(dots[0]); i++)
+        gfx_fill_rect(c, cx + dots[i][0] * s - 1, cy + dots[i][1] * s - 1, s, s, col);
+}
+
+typedef enum { ICON_DOWNLOAD, ICON_QR } icon_t;
+
+// Grande tuile du menu principal
+static bool ui_tile(canvas_t *c, rect_t r, const char *title, const char *sub,
+                    icon_t icon, bool primary)
+{
+    bool pressed, focused;
+    bool clicked = ui_hit(r, true, &pressed, &focused);
+
+    uint16_t bg = primary ? COL_ACCENT_DK : COL_PANEL_HI;
+    if (pressed)
+        bg = gfx_blend(bg, COLOR_RGB(0, 0, 0), 5);
+
+    if (focused)
+    {
+        gfx_round_rect(c, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 12, COL_ACCENT);
+        gfx_round_rect(c, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 11, COL_ACCENT);
+    }
+    gfx_fill_round_rect(c, r.x, r.y, r.w, r.h, 10, bg);
+    gfx_gradient_v(c, r.x + 10, r.y + 1, r.w - 20, 1,
+                   gfx_blend(bg, COLOR_RGB(255, 255, 255), 4), bg);
+
+    int dy = pressed ? 1 : 0;
+    int cx = r.x + r.w / 2, cy = r.y + 30 + dy;
+    if (icon == ICON_DOWNLOAD)
+        icon_download(c, cx, cy, COL_TEXT);
+    else
+        icon_qr(c, cx, cy, COL_TEXT, bg);
+
+    gfx_text_box(c, &font_body, r.x + 4, r.y + 54 + dy, r.w - 8, ALIGN_CENTER,
+                 title, COL_TEXT);
+    gfx_text_box(c, &font_small, r.x + 4, r.y + 54 + font_body.height + dy, r.w - 8,
+                 ALIGN_CENTER, sub, gfx_blend(bg, COL_TEXT, 11));
+    return clicked;
+}
+
+// Barre d'onglets (renvoie l'onglet choisi)
+static int ui_tabs(canvas_t *c, rect_t r, const char *const *labels, int count,
+                   int current)
+{
+    gfx_fill_round_rect(c, r.x, r.y, r.w, r.h, r.h / 2, COL_PANEL);
+    int w = r.w / count;
+    for (int i = 0; i < count; i++)
+    {
+        rect_t t = RECT(r.x + i * w, r.y, w, r.h);
+        bool pressed, focused;
+        if (ui_hit(t, true, &pressed, &focused))
+            current = i;
+        if (i == current)
+            gfx_fill_round_rect(c, t.x + 1, t.y + 1, t.w - 2, t.h - 2, (t.h - 2) / 2,
+                                COL_ACCENT_DK);
+        if (focused)
+            gfx_round_rect(c, t.x, t.y, t.w, t.h, t.h / 2, COL_ACCENT);
+        gfx_text_box(c, &font_small, t.x + 4, t.y + (t.h - font_small.height) / 2,
+                     t.w - 8, ALIGN_CENTER, labels[i],
+                     i == current ? COL_TEXT : COL_TEXT_DIM);
+    }
+    return current;
+}
+
+// Texte de statut du Remote pour l'accueil
+static void remote_summary(char *out, size_t size)
+{
+    switch (remote_state())
+    {
+        case REMOTE_PAIRED:
+            snprintf(out, size, "Remote : connecté à %s", remote_owner_name());
+            break;
+        case REMOTE_NO_SERVER:
+            snprintf(out, size, "Remote : pas de serveur configuré");
+            break;
+        case REMOTE_OFF:
+            snprintf(out, size, "Remote : inactif");
+            break;
+        case REMOTE_WAIT_PAIR:
+            snprintf(out, size, "Remote : en attente du scan");
+            break;
+        default:
+            snprintf(out, size, "Remote : %s", remote_status_text());
+            break;
+    }
+}
+
 static void draw_clock(char *out, size_t size)
 {
     time_t t = time(NULL);
@@ -267,7 +450,8 @@ static void draw_net_card(canvas_t *c, rect_t r)
         y += font_small.height + 2;
     }
 
-    if (app.wifi_ok)
+    // Ligne du mode Wi-Fi seulement s'il reste de la place dans la carte
+    if (app.wifi_ok && y + font_small.height <= r.y + r.h - 6)
     {
         const char *mode = net_is_dsi_mode() ? "Wi-Fi DSi : WPA2, WPA, WEP, ouvert"
                                              : "Wi-Fi DS : WEP et ouvert seulement";
@@ -284,16 +468,118 @@ static void draw_top(canvas_t *c)
     switch (app.screen)
     {
         case SCREEN_HOME:
+        case SCREEN_MORE:
         {
             // Titre "hero"
-            gfx_text_box(c, &font_title, 0, 36, SCREEN_W, ALIGN_CENTER,
+            gfx_text_box(c, &font_title, 0, 30, SCREEN_W, ALIGN_CENTER,
                          "Bienvenue sur " APP_NAME, COL_TEXT);
-            gfx_text_box(c, &font_small, 0, 36 + font_title.height + 2, SCREEN_W,
-                         ALIGN_CENTER, "Utilise l'écran tactile ou la croix + A",
+            gfx_text_box(c, &font_small, 0, 30 + font_title.height + 1, SCREEN_W,
+                         ALIGN_CENTER, "Installe des jeux depuis GitHub ou ton téléphone",
                          COL_TEXT_DIM);
-            draw_net_card(c, RECT(12, 86, SCREEN_W - 24, 94));
+            draw_net_card(c, RECT(12, 72, SCREEN_W - 24, 82));
+
+            // Petit encart Remote
+            rect_t r = RECT(12, 160, SCREEN_W - 24, 24);
+            ui_panel(c, r);
+            char line[128];
+            remote_summary(line, sizeof(line));
+            uint16_t dot = remote_state() == REMOTE_PAIRED ? COL_OK : COL_TEXT_OFF;
+            gfx_fill_circle(c, r.x + 12, r.y + r.h / 2, 3, dot);
+            gfx_text_box(c, &font_small, r.x + 22, r.y + (r.h - font_small.height) / 2,
+                         r.w - 30, ALIGN_LEFT, line, COL_TEXT_DIM);
             break;
         }
+
+        case SCREEN_UNINSTALL:
+        {
+            const game_t *g = &app.to_uninstall;
+            gfx_text(c, &font_title, 12, 30, "Désinstaller", COL_TEXT);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+            int y = r.y + 8;
+            gfx_text_box(c, &font_body, r.x + 8, y, r.w - 16, ALIGN_LEFT, g->file, COL_TEXT);
+            y += font_body.height + 4;
+            char line[320], size[24];
+            format_size(size, sizeof(size), g->size);
+            snprintf(line, sizeof(line), "Taille : %s", size);
+            gfx_text(c, &font_small, r.x + 8, y, line, COL_TEXT_DIM);
+            y += font_small.height + 2;
+            snprintf(line, sizeof(line), "Version : %s", g->version[0] ? g->version : "inconnue");
+            gfx_text(c, &font_small, r.x + 8, y, line, COL_TEXT_DIM);
+            y += font_small.height + 2;
+            snprintf(line, sizeof(line), "Source : %s",
+                     g->source[0] ? g->source : "installé à la main");
+            y += gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16,
+                               font_small.height * 2, line, COL_TEXT_DIM);
+            snprintf(line, sizeof(line), "Fichier : %s/%s", installer_dir(), g->file);
+            gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16, font_small.height * 2,
+                          line, COL_TEXT_OFF);
+            break;
+        }
+
+        case SCREEN_REMOTE:
+        {
+            gfx_text(c, &font_title, 12, 30, "Remote", COL_TEXT);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+            int x = r.x + 8, y = r.y + 6;
+
+            if (remote_state() == REMOTE_NO_SERVER)
+            {
+                gfx_text_wrap(c, &font_small, x, y, r.w - 16, r.h - 12,
+                              "Le Remote a besoin d'un serveur (dossier remote-server "
+                              "du projet), hébergé où tu veux.\n"
+                              "\n"
+                              "Indique son adresse dans le fichier "
+                              "_dsishop/server.txt à la racine de la carte SD, "
+                              "par exemple :\n"
+                              "https://dsishop.mondomaine.fr\n"
+                              "\n"
+                              "Ou compile DSi Shop avec REMOTE_SERVER=...",
+                              COL_TEXT_DIM);
+                break;
+            }
+
+            y += gfx_text_wrap(c, &font_small, x, y, r.w - 16, 80,
+                               "1. Scanne le QR code avec l'appareil photo de ton "
+                               "téléphone\n"
+                               "2. Connecte-toi avec ton compte Google\n"
+                               "3. Installe, cherche sur GitHub, désinstalle… "
+                               "depuis ton téléphone",
+                               COL_TEXT_DIM);
+            y += 4;
+            gfx_hline(c, x, y, r.w - 16, COL_BORDER);
+            y += 6;
+
+            remote_state_t rs = remote_state();
+            uint16_t col = rs == REMOTE_PAIRED ? COL_OK
+                         : rs == REMOTE_ERROR  ? COL_ERR
+                                               : COL_WARN;
+            char line[200];
+            if (rs == REMOTE_PAIRED)
+                snprintf(line, sizeof(line), "Connectée à %s", remote_owner_name());
+            else
+                snprintf(line, sizeof(line), "%s", remote_status_text());
+            gfx_fill_circle(c, x + 4, y + font_body.height / 2, 4, col);
+            gfx_text_box(c, &font_body, x + 14, y, r.w - 30, ALIGN_LEFT, line, COL_TEXT);
+            y += font_body.height + 2;
+
+            if (rs == REMOTE_PAIRED && remote_owner_email()[0])
+            {
+                gfx_text_box(c, &font_small, x + 14, y, r.w - 30, ALIGN_LEFT,
+                             remote_owner_email(), COL_TEXT_DIM);
+                y += font_small.height + 2;
+            }
+
+            const char *server = remote_server();
+            const char *host = strstr(server, "://");
+            snprintf(line, sizeof(line), "Serveur : %s", host ? host + 3 : server);
+            gfx_text_box(c, &font_small, x, r.y + r.h - font_small.height - 5, r.w - 16,
+                         ALIGN_LEFT, line, COL_TEXT_OFF);
+            break;
+        }
+
+
 
         case SCREEN_WIFI:
         case SCREEN_SCAN:
@@ -545,6 +831,13 @@ static uint32_t top_signature(void)
     if (app.screen == SCREEN_INSTALL_DONE)
         MIX(reboot_seconds_left());
     MIX(time(NULL) / 60);
+    MIX(remote_state());
+    MIX(strlen(remote_status_text()));
+    MIX(strlen(remote_owner_name()));
+    for (const char *p = remote_pair_code(); *p; p++)
+        MIX((unsigned char)*p);
+    if (remote_state() == REMOTE_CONNECTING)
+        MIX(app.frame / 5);
     if (net_busy())
         MIX(app.frame / 5); // Animation du spinner
 #undef MIX
@@ -562,40 +855,168 @@ static uint32_t top_signature(void)
 static void screen_home(canvas_t *c, const input_t *in)
 {
     (void)in;
-    ui_header(c, "Accueil", APP_VERSION);
+    ui_header(c, APP_NAME, APP_VERSION);
 
-    bool online = net_state() == NET_CONNECTED;
+    if (!app.games_loaded)
+        refresh_games();
+
+    // Les deux grandes tuiles
+    if (ui_tile(c, RECT(8, 30, 116, 96), "Installer un jeu", "et gérer mes jeux",
+                ICON_DOWNLOAD, true))
+    {
+        app.install_tab = TAB_INSTALL;
+        go(SCREEN_INSTALL);
+    }
+
+    const char *rsub = remote_state() == REMOTE_PAIRED ? "Connecté"
+                                                        : "QR code · téléphone";
+    if (ui_tile(c, RECT(132, 30, 116, 96), "Remote", rsub, ICON_QR, false))
+    {
+        remote_start();
+        remote_request_pair_code();
+        go(SCREEN_REMOTE);
+    }
+
+    // Raccourcis
+    char games[32];
+    snprintf(games, sizeof(games), "Jeux (%d)", app.ngames);
+    const int bw = (SCREEN_W - 16 - 2 * 6) / 3;
+    if (ui_button(c, RECT(8, 134, bw, 26), games, BTN_STYLE_NORMAL, true))
+    {
+        app.install_tab = TAB_GAMES;
+        refresh_games();
+        go(SCREEN_INSTALL);
+    }
+    if (ui_button(c, RECT(8 + bw + 6, 134, bw, 26),
+                  net_state() == NET_CONNECTED ? "Wi-Fi \xE2\x80\xA2" : "Wi-Fi",
+                  BTN_STYLE_NORMAL, app.wifi_ok))
+        go(SCREEN_WIFI);
+    if (ui_button(c, RECT(8 + (bw + 6) * 2, 134, bw, 26), "Plus…", BTN_STYLE_NORMAL,
+                  true))
+        go(SCREEN_MORE);
+
+    const char *warn = NULL;
+    if (!app.wifi_ok)
+        warn = "Le Wi-Fi n'a pas pu être initialisé";
+    else if (!installer_storage_ok())
+        warn = "Carte SD introuvable : installation impossible";
+    if (warn)
+    {
+        gfx_text_box(c, &font_small, 0, SCREEN_H - 20, SCREEN_W, ALIGN_CENTER, warn,
+                     COL_ERR);
+    }
+    else
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "Wi-Fi : %s", net_state_text());
+        gfx_text_box(c, &font_small, 0, SCREEN_H - 20, SCREEN_W, ALIGN_CENTER, line,
+                     COL_TEXT_OFF);
+    }
+}
+
+static void screen_more(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Plus", NULL);
 
     int y = 32;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Installer un jeu",
-                  BTN_STYLE_PRIMARY, true))
-        go(SCREEN_INSTALL);
-    y += BTN_H + 6;
-
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H),
-                  online ? "Wi-Fi (connecté)" : "Wi-Fi", BTN_STYLE_NORMAL,
-                  app.wifi_ok))
-        go(SCREEN_WIFI);
-    y += BTN_H + 6;
-
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Test Internet (HTTP)",
-                  BTN_STYLE_NORMAL, online))
+                  BTN_STYLE_NORMAL, net_state() == NET_CONNECTED))
         go(SCREEN_HTTP);
     y += BTN_H + 6;
-
-    int half = (BTN_W - 8) / 2;
-    if (ui_button(c, RECT(BTN_X0, y, half, BTN_H), "À propos", BTN_STYLE_NORMAL, true))
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "À propos", BTN_STYLE_NORMAL, true))
         go(SCREEN_ABOUT);
-    if (ui_button(c, RECT(BTN_X0 + half + 8, y, half, BTN_H), "Quitter",
+    y += BTN_H + 6;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Quitter DSi Shop",
                   BTN_STYLE_DANGER, true))
         app.quit = true;
+    y += BTN_H + 6;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Retour", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+        go(SCREEN_HOME);
+}
 
-    if (!app.wifi_ok)
-        gfx_text_box(c, &font_small, 0, SCREEN_H - 14, SCREEN_W, ALIGN_CENTER,
-                     "Le Wi-Fi n'a pas pu être initialisé", COL_ERR);
-    else if (!installer_storage_ok())
-        gfx_text_box(c, &font_small, 0, SCREEN_H - 14, SCREEN_W, ALIGN_CENTER,
-                     "Carte SD introuvable : installation impossible", COL_ERR);
+static void screen_remote(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Remote", NULL);
+
+    remote_state_t rs = remote_state();
+    const int col_x = 150, col_w = SCREEN_W - col_x - 8;
+    bool back = false;
+
+    if (rs == REMOTE_NO_SERVER)
+    {
+        gfx_text_wrap(c, &font_small, 16, 34, SCREEN_W - 32, 100,
+                      "Aucun serveur Remote n'est configuré. Regarde l'écran du "
+                      "haut pour savoir comment faire.", COL_TEXT_DIM);
+        back = ui_button(c, RECT(BTN_X0, 150, BTN_W, BTN_H), "Retour",
+                         BTN_STYLE_NORMAL, true);
+    }
+    else
+    {
+        rect_t qr = RECT(6, 26, 140, 140);
+        const char *url = remote_pair_url();
+
+        if (url[0])
+        {
+            draw_qr(c, qr, url);
+            gfx_text_box(c, &font_small, col_x, 30, col_w, ALIGN_LEFT,
+                         rs == REMOTE_PAIRED ? "Associer un autre :" : "Ou tape le code :",
+                         COL_TEXT_DIM);
+            gfx_text_box(c, &font_body, col_x, 32 + font_small.height, col_w,
+                         ALIGN_LEFT, remote_pair_code(), COL_TEXT);
+        }
+        else
+        {
+            gfx_fill_round_rect(c, qr.x + 10, qr.y + 10, qr.w - 20, qr.h - 20, 8,
+                                COL_PANEL);
+            if (rs == REMOTE_WAIT_WIFI)
+                gfx_text_wrap(c, &font_small, qr.x + 20, qr.y + 50, qr.w - 40, 60,
+                              "Connecte-toi d'abord au Wi-Fi", COL_TEXT_DIM);
+            else if (rs == REMOTE_ERROR)
+                gfx_text_wrap(c, &font_small, qr.x + 20, qr.y + 40, qr.w - 40, 80,
+                              remote_status_text(), COL_ERR);
+            else
+                ui_spinner(c, qr.x + qr.w / 2, qr.y + qr.h / 2, 8, app.frame,
+                           COL_ACCENT);
+        }
+
+        // Statut sous le code
+        char line[96];
+        if (rs == REMOTE_PAIRED)
+            snprintf(line, sizeof(line), "Connecté à %s", remote_owner_name());
+        else
+            snprintf(line, sizeof(line), "%s", remote_status_text());
+        gfx_text_wrap(c, &font_small, col_x, 72, col_w, font_small.height * 3, line,
+                      rs == REMOTE_PAIRED ? COL_OK : COL_TEXT_DIM);
+
+        if (rs == REMOTE_WAIT_WIFI)
+        {
+            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Wi-Fi", BTN_STYLE_PRIMARY,
+                          app.wifi_ok))
+                go(SCREEN_WIFI);
+        }
+        else if (rs == REMOTE_PAIRED)
+        {
+            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Délier", BTN_STYLE_DANGER,
+                          true))
+            {
+                remote_forget();
+                ui_toast("DSi déliée : un nouveau QR code arrive");
+            }
+        }
+        else
+        {
+            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Nouveau code",
+                          BTN_STYLE_NORMAL, rs == REMOTE_WAIT_PAIR))
+                remote_request_pair_code();
+        }
+
+        back = ui_button(c, RECT(col_x, 142, col_w, 24), "Retour", BTN_STYLE_NORMAL,
+                         true);
+    }
+
+    if (back || (in->down & BTN_B))
+        go(SCREEN_HOME);
 }
 
 static void screen_wifi(canvas_t *c, const input_t *in)
@@ -810,25 +1231,119 @@ static void screen_http(canvas_t *c, const input_t *in)
     if (ui_button(c, RECT(BTN_X0, 80 + BTN_H + 8, BTN_W, BTN_H), "Retour",
                   BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
-        go(SCREEN_HOME);
+        go(SCREEN_MORE);
 
     if (!online)
         gfx_text_box(c, &font_small, 0, SCREEN_H - 22, SCREEN_W, ALIGN_CENTER,
                      "Connecte-toi d'abord au Wi-Fi", COL_WARN);
 }
 
+#define GAMES_Y     52
+#define GAME_ROW_H  32
+#define GAME_ROWS   3
+
+static void screen_games(canvas_t *c, const input_t *in)
+{
+    if (!app.games_loaded)
+        refresh_games();
+
+    int max_scroll = app.ngames - GAME_ROWS;
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (in->repeat & BTN_L)
+        app.games_scroll--;
+    if (in->repeat & BTN_R)
+        app.games_scroll++;
+    if (app.games_scroll > max_scroll)
+        app.games_scroll = max_scroll;
+    if (app.games_scroll < 0)
+        app.games_scroll = 0;
+
+    if (app.ngames == 0)
+    {
+        char line[128];
+        snprintf(line, sizeof(line), "Aucun jeu dans %s.\nInstalle ton premier jeu "
+                 "avec l'onglet « Installer » ou depuis le Remote.", installer_dir());
+        gfx_text_wrap(c, &font_small, 16, GAMES_Y + 16, SCREEN_W - 32, 80, line,
+                      COL_TEXT_DIM);
+    }
+
+    for (int row = 0; row < GAME_ROWS; row++)
+    {
+        int i = app.games_scroll + row;
+        if (i >= app.ngames)
+            break;
+        const game_t *g = &app.games[i];
+
+        char size[24], sub[96];
+        format_size(size, sizeof(size), g->size);
+        if (g->version[0])
+            snprintf(sub, sizeof(sub), "%s · %s", g->version, size);
+        else
+            snprintf(sub, sizeof(sub), "%s", size);
+
+        rect_t r = RECT(8, GAMES_Y + row * (GAME_ROW_H + 4), SCREEN_W - 16 - 12,
+                        GAME_ROW_H);
+        if (ui_list_item(c, r, g->file, sub, "Suppr.", COL_ERR))
+        {
+            app.to_uninstall = *g;
+            go(SCREEN_UNINSTALL);
+            return;
+        }
+    }
+
+    if (app.ngames > GAME_ROWS)
+    {
+        int track_h = GAME_ROWS * (GAME_ROW_H + 4) - 4;
+        int thumb_h = track_h * GAME_ROWS / app.ngames;
+        int thumb_y = GAMES_Y + (track_h - thumb_h) * app.games_scroll / max_scroll;
+        gfx_fill_round_rect(c, SCREEN_W - 12, GAMES_Y, 4, track_h, 2, COL_PANEL);
+        gfx_fill_round_rect(c, SCREEN_W - 12, thumb_y, 4, thumb_h, 2, COL_ACCENT);
+    }
+
+    int by = SCREEN_H - 28;
+    int bw = (SCREEN_W - 16 - 8 * 2) / 3;
+    if (ui_button(c, RECT(8, by, bw, 22), "\xE2\x86\x91 L", BTN_STYLE_NORMAL,
+                  app.games_scroll > 0))
+        app.games_scroll--;
+    if (ui_button(c, RECT(8 + bw + 8, by, bw, 22), "Retour", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+        go(SCREEN_HOME);
+    if (ui_button(c, RECT(8 + (bw + 8) * 2, by, bw, 22), "R \xE2\x86\x93",
+                  BTN_STYLE_NORMAL, app.games_scroll < max_scroll))
+        app.games_scroll++;
+}
+
 static void screen_install(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Installer un jeu", NULL);
 
+    char games_label[32];
+    snprintf(games_label, sizeof(games_label), "Mes jeux (%d)", app.ngames);
+    const char *const tabs[2] = { "Installer", games_label };
+    int tab = ui_tabs(c, RECT(8, 26, SCREEN_W - 16, 20), tabs, 2, app.install_tab);
+    if (tab != app.install_tab)
+    {
+        app.install_tab = tab;
+        if (tab == TAB_GAMES)
+            refresh_games();
+        app.force_redraw = true;
+    }
+
+    if (app.install_tab == TAB_GAMES)
+    {
+        screen_games(c, in);
+        return;
+    }
+
     bool busy = install_busy();
     bool online = net_state() == NET_CONNECTED;
 
-    gfx_text_box(c, &font_small, 10, 28, SCREEN_W - 20, ALIGN_LEFT,
+    gfx_text_box(c, &font_small, 10, 50, SCREEN_W - 20, ALIGN_LEFT,
                  "Lien GitHub ou URL d'un .nds / .dsi / .zip", COL_TEXT_DIM);
 
     // Le champ est un widget : on le touche (ou A) pour ouvrir le clavier
-    rect_t f = RECT(8, 42, SCREEN_W - 16, 26);
+    rect_t f = RECT(8, 64, SCREEN_W - 16, 26);
     bool pressed, focused;
     if (ui_hit(f, !busy, &pressed, &focused))
     {
@@ -852,14 +1367,14 @@ static void screen_install(canvas_t *c, const input_t *in)
             snprintf(line, sizeof(line), "%s", now);
         }
 
-        draw_progress_bar(c, RECT(16, 80, SCREEN_W - 32, 10),
+        draw_progress_bar(c, RECT(16, 100, SCREEN_W - 32, 10),
                           installer_progress_now(), installer_progress_total());
         int lw = gfx_text_width(&font_small, line);
-        gfx_text_box(c, &font_small, 16, 94, SCREEN_W - 32 - lw - 8, ALIGN_LEFT,
+        gfx_text_box(c, &font_small, 16, 114, SCREEN_W - 32 - lw - 8, ALIGN_LEFT,
                      installer_message(), COL_TEXT);
-        gfx_text(c, &font_small, SCREEN_W - 16 - lw, 94, line, COL_TEXT_DIM);
+        gfx_text(c, &font_small, SCREEN_W - 16 - lw, 114, line, COL_TEXT_DIM);
 
-        if (ui_button(c, RECT(BTN_X0, 120, BTN_W, BTN_H), "Annuler",
+        if (ui_button(c, RECT(BTN_X0, 140, BTN_W, BTN_H), "Annuler",
                       BTN_STYLE_DANGER, true) ||
             (in->down & BTN_B))
             installer_cancel();
@@ -867,7 +1382,7 @@ static void screen_install(canvas_t *c, const input_t *in)
     else
     {
         bool can = online && installer_storage_ok() && app.url[0] != '\0';
-        if (ui_button(c, RECT(BTN_X0, 80, BTN_W, BTN_H), "Installer",
+        if (ui_button(c, RECT(BTN_X0, 98, BTN_W, BTN_H), "Installer",
                       BTN_STYLE_PRIMARY, can) ||
             (can && (in->down & BTN_START)))
         {
@@ -875,7 +1390,7 @@ static void screen_install(canvas_t *c, const input_t *in)
                 ui_toast("Impossible de lancer l'installation");
         }
 
-        if (ui_button(c, RECT(BTN_X0, 80 + BTN_H + 6, BTN_W, BTN_H), "Retour",
+        if (ui_button(c, RECT(BTN_X0, 98 + BTN_H + 6, BTN_W, BTN_H), "Retour",
                       BTN_STYLE_NORMAL, true) ||
             (in->down & BTN_B))
             go(SCREEN_HOME);
@@ -896,21 +1411,41 @@ static void screen_install(canvas_t *c, const input_t *in)
                          dest, COL_TEXT_OFF);
         }
     }
+}
 
-    // Fin d'installation : écran de redémarrage, ou message d'erreur
-    inst_state_t st = installer_state();
-    if (st != app.last_inst_state)
+static void screen_uninstall(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Désinstaller", NULL);
+
+    const game_t *g = &app.to_uninstall;
+    gfx_text_box(c, &font_body, 12, 34, SCREEN_W - 24, ALIGN_CENTER, g->file, COL_TEXT);
+    gfx_text_wrap(c, &font_small, 20, 56, SCREEN_W - 40, 50,
+                  "Le jeu sera supprimé de la carte SD. Tu pourras le "
+                  "réinstaller plus tard.", COL_TEXT_DIM);
+
+    if (ui_button(c, RECT(BTN_X0, 104, BTN_W, BTN_H), "Désinstaller",
+                  BTN_STYLE_DANGER, !install_busy()))
     {
-        if (st == INST_DONE)
+        if (games_uninstall(installer_dir(), g->file))
         {
-            app.done_frame = app.frame;
-            go(SCREEN_INSTALL_DONE);
+            refresh_games();
+            app.install_tab = TAB_GAMES;
+            go(SCREEN_INSTALL);
+            ui_toast("Jeu désinstallé");
         }
-        else if (st == INST_ERROR)
+        else
         {
-            ui_toast("Échec de l'installation");
+            ui_toast("Impossible de supprimer le fichier");
         }
-        app.last_inst_state = st;
+        return;
+    }
+
+    if (ui_button(c, RECT(BTN_X0, 104 + BTN_H + 6, BTN_W, BTN_H), "Annuler",
+                  BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+    {
+        app.install_tab = TAB_GAMES;
+        go(SCREEN_INSTALL);
     }
 }
 
@@ -978,14 +1513,83 @@ static void screen_about(canvas_t *c, const input_t *in)
     if (ui_button(c, RECT(BTN_X0, 120, BTN_W, BTN_H), "Retour", BTN_STYLE_NORMAL,
                   true) ||
         (in->down & BTN_B))
-        go(SCREEN_HOME);
+        go(SCREEN_MORE);
 }
 
 // ---------------------------------------------------------------------------
 
+// Réagit aux installations (locales ou lancées depuis le Remote) et aux
+// événements du Remote, quel que soit l'écran affiché
+static void handle_background_events(void)
+{
+    inst_state_t st = installer_state();
+    if (st != app.last_inst_state)
+    {
+        bool busy = st >= INST_RESOLVING && st <= INST_VERIFYING;
+        bool was_busy = app.last_inst_state >= INST_RESOLVING &&
+                        app.last_inst_state <= INST_VERIFYING;
+
+        if (busy && !was_busy && app.screen != SCREEN_INSTALL)
+        {
+            app.install_tab = TAB_INSTALL;
+            go(SCREEN_INSTALL);
+            if (installer_was_remote())
+                ui_toast("Installation demandée depuis le Remote");
+        }
+        else if (st == INST_DONE)
+        {
+            refresh_games();
+            if (installer_was_remote())
+            {
+                // Pas de redémarrage automatique : on peut en enchaîner plusieurs
+                char msg[160];
+                snprintf(msg, sizeof(msg), "Installé : %s", installer_file_name());
+                ui_toast(msg);
+            }
+            else
+            {
+                app.done_frame = app.frame;
+                go(SCREEN_INSTALL_DONE);
+            }
+        }
+        else if (st == INST_ERROR)
+        {
+            ui_toast("Échec de l'installation");
+        }
+        app.last_inst_state = st;
+    }
+
+    remote_event_t ev;
+    while ((ev = remote_poll_event()) != REMOTE_EV_NONE)
+    {
+        switch (ev)
+        {
+            case REMOTE_EV_GAMES_CHANGED:
+                refresh_games();
+                ui_toast("Jeu désinstallé depuis le Remote");
+                app.force_redraw = true;
+                break;
+            case REMOTE_EV_REBOOT:
+                app.reboot = true;
+                break;
+            case REMOTE_EV_PAIRED:
+            {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "Remote : connecté à %s", remote_owner_name());
+                ui_toast(msg);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
 void app_frame(const input_t *in)
 {
     app.frame++;
+
+    handle_background_events();
 
     ui_begin(in);
 
@@ -998,7 +1602,8 @@ void app_frame(const input_t *in)
                          app.screen == SCREEN_PASSWORD || // Curseur clignotant
                          app.screen == SCREEN_URL ||
                          app.screen == SCREEN_INSTALL_DONE ||
-                         (app.screen == SCREEN_INSTALL && install_busy());
+                         (app.screen == SCREEN_INSTALL && install_busy()) ||
+                         (app.screen == SCREEN_REMOTE && remote_pair_url()[0] == '\0');
 
     app_screen_t drawn = app.screen;
     app.force_redraw = false;
@@ -1019,6 +1624,9 @@ void app_frame(const input_t *in)
             case SCREEN_INSTALL:  screen_install(c, in); break;
             case SCREEN_URL:      screen_url(c, in); break;
             case SCREEN_INSTALL_DONE: screen_install_done(c, in); break;
+            case SCREEN_UNINSTALL: screen_uninstall(c, in); break;
+            case SCREEN_REMOTE:   screen_remote(c, in); break;
+            case SCREEN_MORE:     screen_more(c, in); break;
         }
 
         ui_draw_toast(c);
