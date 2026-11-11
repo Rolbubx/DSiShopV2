@@ -72,19 +72,27 @@ int main(int argc, char **argv)
     // au blanc : sans ça, tout l'écran reste blanc sur une vraie DSi
     setBrightness(3, 0);
 
+    // DIAGNOSTIC écran blanc : couleur de fond témoin à chaque étape, visible
+    // sans gfx_init (mode 0, aucun fond actif => seule la couleur 0 s'affiche)
+    REG_DISPCNT = MODE_0_2D;
+    REG_DISPCNT_SUB = MODE_0_2D;
+    BG_PALETTE[0] = RGB15(31, 0, 0);      // ROUGE : main() atteint
+    BG_PALETTE_SUB[0] = RGB15(31, 0, 0);
+
     // Plantage : affiche les registres au lieu d'un écran figé
     defaultExceptionHandler();
-
-    // Pixels "transparents" = couleur de fond : noir plutôt que ce que le
-    // menu de lancement a laissé (souvent blanc)
-    BG_PALETTE[0] = 0;
-    BG_PALETTE_SUB[0] = 0;
 
     // Sur DSi on passe l'ARM9 à 134 MHz (rendu logiciel plus fluide)
     if (isDSiMode())
         setCpuClock(true);
 
+    BG_PALETTE[0] = RGB15(31, 31, 0);     // JAUNE : setCpuClock OK
+    BG_PALETTE_SUB[0] = RGB15(31, 31, 0);
+
     gfx_init();
+
+    BG_PALETTE[0] = 0;                    // gfx_init OK : fond noir normal
+    BG_PALETTE_SUB[0] = 0;
     keysSetRepeat(20, 4);
 
     // B maintenu au lancement : on démarre sans Wi-Fi (secours si l'init
