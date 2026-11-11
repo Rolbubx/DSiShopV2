@@ -1,5 +1,5 @@
 # Simulateur PC de l'interface (sans matériel DS). Nécessite gcc.
-SRC := sim_main.c net_sim.c \
+SRC := sim_main.c net_sim.c installer_sim.c \
        ../../source/app.c ../../source/gfx.c ../../source/ui.c \
        ../../source/keyboard.c ../../source/font_data.c
 

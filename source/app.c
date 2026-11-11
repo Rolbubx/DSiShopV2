@@ -6,6 +6,7 @@
 
 #include "app.h"
 #include "gfx.h"
+#include "installer.h"
 #include "keyboard.h"
 #include "net.h"
 #include "ui.h"
@@ -21,7 +22,13 @@ typedef enum {
     SCREEN_PASSWORD,
     SCREEN_HTTP,
     SCREEN_ABOUT,
+    SCREEN_INSTALL,       // Saisie du lien + progression
+    SCREEN_URL,           // Clavier pour taper le lien
+    SCREEN_INSTALL_DONE,  // Installé : compte à rebours avant redémarrage
 } app_screen_t;
+
+// Délai avant le redémarrage automatique après une installation
+#define REBOOT_DELAY_FRAMES (5 * 60)
 
 static struct {
     app_screen_t screen;
@@ -35,11 +42,18 @@ static struct {
     net_ap_t selected;
 
     char password[65];
+    char url[256];
+
+    bool reboot;
+    unsigned int done_frame;
+    inst_state_t last_inst_state;
 
     // Pour ne redessiner l'écran du haut que si quelque chose a changé
     uint32_t top_signature;
     bool force_redraw;
 } app;
+
+static int reboot_seconds_left(void);
 
 static void go(app_screen_t screen)
 {
@@ -53,12 +67,18 @@ void app_init(bool wifi_ok)
     memset(&app, 0, sizeof(app));
     app.wifi_ok = wifi_ok;
     app.top_signature = 0xFFFFFFFF;
+    snprintf(app.url, sizeof(app.url), "github.com/");
     go(SCREEN_HOME);
 }
 
 bool app_should_quit(void)
 {
     return app.quit;
+}
+
+bool app_should_reboot(void)
+{
+    return app.reboot;
 }
 
 static const char *security_name(net_security_t s)
@@ -82,10 +102,87 @@ static int ap_bars(const net_ap_t *ap)
     return r >= 40 ? 4 : r >= 30 ? 3 : r >= 20 ? 2 : 1;
 }
 
+static bool install_busy(void)
+{
+    inst_state_t s = installer_state();
+    return s >= INST_RESOLVING && s <= INST_VERIFYING;
+}
+
 static bool net_busy(void)
 {
     net_state_t s = net_state();
-    return s == NET_CONNECTING || s == NET_SCANNING || http_state() == HTTP_BUSY;
+    return s == NET_CONNECTING || s == NET_SCANNING || http_state() == HTTP_BUSY ||
+           install_busy();
+}
+
+// "1,4 Mo", "820 Ko"...
+static void format_size(char *out, size_t size, size_t bytes)
+{
+    if (bytes >= 1024 * 1024)
+    {
+        unsigned int tenths = (unsigned int)((bytes * 10) / (1024 * 1024));
+        snprintf(out, size, "%u,%u Mo", tenths / 10, tenths % 10);
+    }
+    else
+    {
+        snprintf(out, size, "%u Ko", (unsigned int)((bytes + 1023) / 1024));
+    }
+}
+
+static void draw_progress_bar(canvas_t *c, rect_t r, size_t now, size_t total)
+{
+    gfx_fill_round_rect(c, r.x, r.y, r.w, r.h, r.h / 2, COL_PANEL);
+    if (total > 0)
+    {
+        int w = (int)((uint64_t)r.w * (now > total ? total : now) / total);
+        if (w >= r.h)
+            gfx_fill_round_rect(c, r.x, r.y, w, r.h, r.h / 2, COL_ACCENT);
+    }
+    else
+    {
+        // Taille inconnue : segment qui se déplace
+        int seg = r.w / 4;
+        int x = (int)((app.frame * 3) % (unsigned int)(r.w + seg)) - seg;
+        int x0 = x < 0 ? 0 : x;
+        int x1 = x + seg > r.w ? r.w : x + seg;
+        if (x1 - x0 >= r.h)
+            gfx_fill_round_rect(c, r.x + x0, r.y, x1 - x0, r.h, r.h / 2, COL_ACCENT);
+    }
+}
+
+// Petite coche dessinée à la main, centrée sur (cx, cy)
+static void draw_check(canvas_t *c, int cx, int cy, uint16_t color)
+{
+    static const int8_t pts[][2] = {
+        { -3, 0 }, { -2, 1 }, { -1, 2 }, { 0, 1 }, { 1, 0 }, { 2, -1 }, { 3, -2 },
+    };
+    for (size_t i = 0; i < sizeof(pts) / sizeof(pts[0]); i++)
+        gfx_fill_rect(c, cx + pts[i][0], cy + pts[i][1], 2, 2, color);
+}
+
+// Champ de texte (lien, mot de passe), avec curseur clignotant optionnel
+static void draw_text_field(canvas_t *c, rect_t f, const char *text,
+                            const char *placeholder, bool cursor, bool focused)
+{
+    gfx_fill_round_rect(c, f.x, f.y, f.w, f.h, 5, focused ? COL_ACCENT : COL_BORDER);
+    gfx_fill_round_rect(c, f.x + 1, f.y + 1, f.w - 2, f.h - 2, 4, COL_BG);
+
+    int ty = f.y + (f.h - font_body.height) / 2;
+
+    if (text[0] == '\0' && placeholder)
+    {
+        gfx_text_box(c, &font_body, f.x + 8, ty, f.w - 16, ALIGN_LEFT,
+                     placeholder, COL_TEXT_OFF);
+        return;
+    }
+
+    // Affiche la fin du texte s'il est trop long
+    const char *shown = text;
+    while (*shown && gfx_text_width(&font_body, shown) > f.w - 20)
+        shown++;
+    int end = gfx_text(c, &font_body, f.x + 8, ty, shown, COL_TEXT);
+    if (cursor && ((app.frame / 30) & 1))
+        gfx_vline(c, end + 1, ty + 1, font_body.height - 2, COL_ACCENT);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +366,132 @@ static void draw_top(canvas_t *c)
             break;
         }
 
+        case SCREEN_INSTALL:
+        case SCREEN_URL:
+        {
+            gfx_text(c, &font_title, 12, 30, "Installer un jeu", COL_TEXT);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+
+            inst_state_t st = installer_state();
+
+            if (st == INST_IDLE || st == INST_DONE)
+            {
+                char help[320];
+                snprintf(help, sizeof(help),
+                         "Colle le lien d'un projet GitHub : la dernière release "
+                         "est téléchargée automatiquement.\n"
+                         "\n"
+                         "\xE2\x80\xA2 github.com/auteur/projet\n"
+                         "\xE2\x80\xA2 auteur/projet\n"
+                         "\xE2\x80\xA2 https://site.com/jeu.nds (.dsi, .zip)\n"
+                         "\n"
+                         "Le jeu est copié dans %s, puis la console redémarre.",
+                         installer_dir());
+                gfx_text_wrap(c, &font_small, r.x + 8, r.y + 6, r.w - 16, r.h - 12,
+                              help, COL_TEXT_DIM);
+                break;
+            }
+
+            if (st == INST_ERROR)
+            {
+                gfx_text(c, &font_body, r.x + 8, r.y + 6, "Échec de l'installation",
+                         COL_ERR);
+                gfx_text_wrap(c, &font_small, r.x + 8, r.y + 8 + font_body.height,
+                              r.w - 16, r.h - 16 - font_body.height,
+                              installer_message(), COL_TEXT);
+                break;
+            }
+
+            // Liste des étapes
+            static const struct {
+                inst_state_t state;
+                const char *label;
+            } steps[] = {
+                { INST_RESOLVING, "Recherche de la release" },
+                { INST_DOWNLOADING, "Téléchargement" },
+                { INST_EXTRACTING, "Extraction de l'archive" },
+                { INST_VERIFYING, "Vérification et copie sur la SD" },
+            };
+
+            int y = r.y + 8;
+            for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++)
+            {
+                int cy = y + font_body.height / 2;
+                uint16_t col = COL_TEXT_OFF;
+                if (steps[i].state < st)
+                {
+                    gfx_fill_circle(c, r.x + 14, cy, 6, COL_OK);
+                    draw_check(c, r.x + 13, cy, COL_BG2);
+                    col = COL_TEXT_DIM;
+                }
+                else if (steps[i].state == st)
+                {
+                    ui_spinner(c, r.x + 14, cy, 5, app.frame, COL_ACCENT);
+                    col = COL_TEXT;
+                }
+                else
+                {
+                    gfx_fill_circle(c, r.x + 14, cy, 3, COL_BORDER);
+                }
+                gfx_text(c, &font_body, r.x + 28, y, steps[i].label, col);
+                y += font_body.height + 4;
+            }
+
+            y += 4;
+            gfx_hline(c, r.x + 8, y, r.w - 16, COL_BORDER);
+            y += 6;
+
+            char line[192];
+            if (installer_file_name()[0])
+            {
+                snprintf(line, sizeof(line), "Fichier : %s", installer_file_name());
+                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                             COL_TEXT_DIM);
+                y += font_small.height + 2;
+            }
+            if (installer_release()[0])
+            {
+                snprintf(line, sizeof(line), "Release : %s", installer_release());
+                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                             COL_TEXT_DIM);
+            }
+            break;
+        }
+
+        case SCREEN_INSTALL_DONE:
+        {
+            gfx_text(c, &font_title, 12, 30, "C'est installé !", COL_OK);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+
+            char line[288];
+            int y = r.y + 8;
+            gfx_text_box(c, &font_body, r.x + 8, y, r.w - 16, ALIGN_LEFT,
+                         installer_file_name(), COL_TEXT);
+            y += font_body.height + 4;
+
+            if (installer_release()[0])
+            {
+                snprintf(line, sizeof(line), "Version : %s", installer_release());
+                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                             COL_TEXT_DIM);
+                y += font_small.height + 2;
+            }
+
+            snprintf(line, sizeof(line), "Emplacement : %s", installer_dest_path());
+            y += gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16,
+                               font_small.height * 2, line, COL_TEXT_DIM);
+            y += 8;
+
+            snprintf(line, sizeof(line), "La console redémarre dans %d s. "
+                     "Le jeu apparaîtra dans ton menu (TWiLight Menu++…).",
+                     reboot_seconds_left());
+            gfx_text_wrap(c, &font_small, r.x + 8, y, r.w - 16, r.y + r.h - y - 4,
+                          line, COL_TEXT);
+            break;
+        }
+
         case SCREEN_ABOUT:
         {
             gfx_text(c, &font_title, 12, 30, "À propos", COL_TEXT);
@@ -302,6 +525,13 @@ static uint32_t top_signature(void)
     MIX(http_bytes_received());
     MIX((uintptr_t)http_progress_text()[0]);
     MIX(net_signal_bars());
+    MIX(installer_state());
+    MIX(installer_progress_now() / 8192);
+    MIX(installer_progress_total());
+    MIX(strlen(installer_message()));
+    MIX((unsigned char)installer_message()[0]);
+    if (app.screen == SCREEN_INSTALL_DONE)
+        MIX(reboot_seconds_left());
     MIX(time(NULL) / 60);
     if (net_busy())
         MIX(app.frame / 5); // Animation du spinner
@@ -322,16 +552,24 @@ static void screen_home(canvas_t *c, const input_t *in)
     (void)in;
     ui_header(c, "Accueil", APP_VERSION);
 
-    int y = 34;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Wi-Fi", BTN_STYLE_PRIMARY,
+    bool online = net_state() == NET_CONNECTED;
+
+    int y = 32;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Installer un jeu",
+                  BTN_STYLE_PRIMARY, true))
+        go(SCREEN_INSTALL);
+    y += BTN_H + 6;
+
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H),
+                  online ? "Wi-Fi (connecté)" : "Wi-Fi", BTN_STYLE_NORMAL,
                   app.wifi_ok))
         go(SCREEN_WIFI);
-    y += BTN_H + 8;
+    y += BTN_H + 6;
 
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, BTN_H), "Test Internet (HTTP)",
-                  BTN_STYLE_NORMAL, net_state() == NET_CONNECTED))
+                  BTN_STYLE_NORMAL, online))
         go(SCREEN_HTTP);
-    y += BTN_H + 8;
+    y += BTN_H + 6;
 
     int half = (BTN_W - 8) / 2;
     if (ui_button(c, RECT(BTN_X0, y, half, BTN_H), "À propos", BTN_STYLE_NORMAL, true))
@@ -341,8 +579,11 @@ static void screen_home(canvas_t *c, const input_t *in)
         app.quit = true;
 
     if (!app.wifi_ok)
-        gfx_text_box(c, &font_small, 0, SCREEN_H - 22, SCREEN_W, ALIGN_CENTER,
+        gfx_text_box(c, &font_small, 0, SCREEN_H - 14, SCREEN_W, ALIGN_CENTER,
                      "Le Wi-Fi n'a pas pu être initialisé", COL_ERR);
+    else if (!installer_storage_ok())
+        gfx_text_box(c, &font_small, 0, SCREEN_H - 14, SCREEN_W, ALIGN_CENTER,
+                     "Carte SD introuvable : installation impossible", COL_ERR);
 }
 
 static void screen_wifi(canvas_t *c, const input_t *in)
@@ -495,19 +736,8 @@ static void screen_password(canvas_t *c, const input_t *in)
     gfx_text_box(c, &font_small, 10, 28, SCREEN_W - 20, ALIGN_LEFT,
                  app.selected.ssid, COL_TEXT_DIM);
 
-    // Champ de saisie
     rect_t f = RECT(8, 42, SCREEN_W - 16, 26);
-    gfx_fill_round_rect(c, f.x, f.y, f.w, f.h, 5, COL_ACCENT);
-    gfx_fill_round_rect(c, f.x + 1, f.y + 1, f.w - 2, f.h - 2, 4, COL_BG);
-
-    // Affiche la fin du mot de passe si trop long
-    const char *shown = app.password;
-    while (gfx_text_width(&font_body, shown) > f.w - 20)
-        shown++;
-    int ty = f.y + (f.h - font_body.height) / 2;
-    int end = gfx_text(c, &font_body, f.x + 8, ty, shown, COL_TEXT);
-    if ((app.frame / 30) & 1)
-        gfx_vline(c, end + 1, ty + 1, font_body.height - 2, COL_ACCENT);
+    draw_text_field(c, f, app.password, NULL, true, true);
 
     char count[16];
     snprintf(count, sizeof(count), "%u car.", (unsigned)strlen(app.password));
@@ -575,6 +805,156 @@ static void screen_http(canvas_t *c, const input_t *in)
                      "Connecte-toi d'abord au Wi-Fi", COL_WARN);
 }
 
+static void screen_install(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Installer un jeu", NULL);
+
+    bool busy = install_busy();
+    bool online = net_state() == NET_CONNECTED;
+
+    gfx_text_box(c, &font_small, 10, 28, SCREEN_W - 20, ALIGN_LEFT,
+                 "Lien GitHub ou URL d'un .nds / .dsi / .zip", COL_TEXT_DIM);
+
+    // Le champ est un widget : on le touche (ou A) pour ouvrir le clavier
+    rect_t f = RECT(8, 42, SCREEN_W - 16, 26);
+    bool pressed, focused;
+    if (ui_hit(f, !busy, &pressed, &focused))
+    {
+        kbd_open(app.url, sizeof(app.url));
+        go(SCREEN_URL);
+    }
+    draw_text_field(c, f, app.url, "github.com/auteur/projet", false,
+                    focused || pressed);
+
+    if (busy)
+    {
+        char now[16], total[24], line[64];
+        format_size(now, sizeof(now), installer_progress_now());
+        if (installer_progress_total() > 0)
+        {
+            format_size(total, sizeof(total), installer_progress_total());
+            snprintf(line, sizeof(line), "%s / %s", now, total);
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "%s", now);
+        }
+
+        draw_progress_bar(c, RECT(16, 80, SCREEN_W - 32, 10),
+                          installer_progress_now(), installer_progress_total());
+        int lw = gfx_text_width(&font_small, line);
+        gfx_text_box(c, &font_small, 16, 94, SCREEN_W - 32 - lw - 8, ALIGN_LEFT,
+                     installer_message(), COL_TEXT);
+        gfx_text(c, &font_small, SCREEN_W - 16 - lw, 94, line, COL_TEXT_DIM);
+
+        if (ui_button(c, RECT(BTN_X0, 120, BTN_W, BTN_H), "Annuler",
+                      BTN_STYLE_DANGER, true) ||
+            (in->down & BTN_B))
+            installer_cancel();
+    }
+    else
+    {
+        bool can = online && installer_storage_ok() && app.url[0] != '\0';
+        if (ui_button(c, RECT(BTN_X0, 80, BTN_W, BTN_H), "Installer",
+                      BTN_STYLE_PRIMARY, can) ||
+            (can && (in->down & BTN_START)))
+        {
+            if (!installer_start(app.url))
+                ui_toast("Impossible de lancer l'installation");
+        }
+
+        if (ui_button(c, RECT(BTN_X0, 80 + BTN_H + 6, BTN_W, BTN_H), "Retour",
+                      BTN_STYLE_NORMAL, true) ||
+            (in->down & BTN_B))
+            go(SCREEN_HOME);
+
+        const char *warn = NULL;
+        if (!installer_storage_ok())
+            warn = "Carte SD introuvable";
+        else if (!online)
+            warn = "Connecte-toi d'abord au Wi-Fi";
+        if (warn)
+            gfx_text_box(c, &font_small, 0, SCREEN_H - 16, SCREEN_W, ALIGN_CENTER,
+                         warn, COL_WARN);
+        else
+        {
+            char dest[96];
+            snprintf(dest, sizeof(dest), "Destination : %s", installer_dir());
+            gfx_text_box(c, &font_small, 0, SCREEN_H - 16, SCREEN_W, ALIGN_CENTER,
+                         dest, COL_TEXT_OFF);
+        }
+    }
+
+    // Fin d'installation : écran de redémarrage, ou message d'erreur
+    inst_state_t st = installer_state();
+    if (st != app.last_inst_state)
+    {
+        if (st == INST_DONE)
+        {
+            app.done_frame = app.frame;
+            go(SCREEN_INSTALL_DONE);
+        }
+        else if (st == INST_ERROR)
+        {
+            ui_toast("Échec de l'installation");
+        }
+        app.last_inst_state = st;
+    }
+}
+
+static void screen_url(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Lien du jeu", NULL);
+
+    gfx_text_box(c, &font_small, 10, 28, SCREEN_W - 20, ALIGN_LEFT,
+                 "Ex. : github.com/auteur/projet", COL_TEXT_DIM);
+
+    rect_t f = RECT(8, 42, SCREEN_W - 16, 26);
+    draw_text_field(c, f, app.url, NULL, true, true);
+
+    kbd_result_t r = kbd_update(c, in, 88);
+    if (r != KBD_EDITING)
+        go(SCREEN_INSTALL);
+}
+
+static int reboot_seconds_left(void)
+{
+    unsigned int elapsed = app.frame - app.done_frame;
+    if (elapsed >= REBOOT_DELAY_FRAMES)
+        return 0;
+    return (int)((REBOOT_DELAY_FRAMES - elapsed + 59) / 60);
+}
+
+static void screen_install_done(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Installation terminée", NULL);
+
+    gfx_fill_circle(c, SCREEN_W / 2, 50, 14, COL_OK);
+    draw_check(c, SCREEN_W / 2 - 1, 50, COL_BG);
+
+    gfx_text_box(c, &font_body, 12, 70, SCREEN_W - 24, ALIGN_CENTER,
+                 installer_file_name(), COL_TEXT);
+
+    char line[48];
+    snprintf(line, sizeof(line), "Redémarrage dans %d s…", reboot_seconds_left());
+    gfx_text_box(c, &font_small, 0, 88, SCREEN_W, ALIGN_CENTER, line, COL_TEXT_DIM);
+
+    if (ui_button(c, RECT(BTN_X0, 108, BTN_W, BTN_H), "Redémarrer maintenant",
+                  BTN_STYLE_PRIMARY, true))
+        app.reboot = true;
+
+    if (ui_button(c, RECT(BTN_X0, 108 + BTN_H + 6, BTN_W, BTN_H),
+                  "Plus tard (installer un autre jeu)", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+    {
+        go(SCREEN_INSTALL);
+        return;
+    }
+
+    if (reboot_seconds_left() == 0)
+        app.reboot = true;
+}
+
 static void screen_about(canvas_t *c, const input_t *in)
 {
     ui_header(c, "À propos", NULL);
@@ -603,7 +983,10 @@ void app_frame(const input_t *in)
     bool state_changed = sig != app.top_signature;
     bool bottom_needed = app.force_redraw || state_changed || ui_wants_redraw() ||
                          in->down || in->up || in->repeat ||
-                         app.screen == SCREEN_PASSWORD; // Curseur clignotant
+                         app.screen == SCREEN_PASSWORD || // Curseur clignotant
+                         app.screen == SCREEN_URL ||
+                         app.screen == SCREEN_INSTALL_DONE ||
+                         (app.screen == SCREEN_INSTALL && install_busy());
 
     app_screen_t drawn = app.screen;
     app.force_redraw = false;
@@ -621,6 +1004,9 @@ void app_frame(const input_t *in)
             case SCREEN_PASSWORD: screen_password(c, in); break;
             case SCREEN_HTTP:     screen_http(c, in); break;
             case SCREEN_ABOUT:    screen_about(c, in); break;
+            case SCREEN_INSTALL:  screen_install(c, in); break;
+            case SCREEN_URL:      screen_url(c, in); break;
+            case SCREEN_INSTALL_DONE: screen_install_done(c, in); break;
         }
 
         ui_draw_toast(c);

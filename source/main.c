@@ -1,10 +1,12 @@
 // DSi Shop — point d'entrée : init matérielle et boucle principale
 
 #include <nds.h>
+#include <dswifi9.h>
 
 #include "app.h"
 #include "gfx.h"
 #include "input.h"
+#include "installer.h"
 #include "net.h"
 
 static void read_input(input_t *in)
@@ -39,6 +41,8 @@ int main(int argc, char **argv)
     gfx_init();
     keysSetRepeat(20, 4);
 
+    // Carte SD (pour installer les jeux) puis Wi-Fi
+    installer_init();
     bool wifi_ok = net_init();
     app_init(wifi_ok);
 
@@ -58,6 +62,21 @@ int main(int argc, char **argv)
 
         if (app_should_quit())
             break;
+
+        if (app_should_reboot())
+        {
+            // Laisse le temps à l'écran de s'afficher, puis redémarre.
+            // systemReboot() ne fonctionne que sur DSi ; sur DS on retourne
+            // au menu de lancement, qui listera le nouveau jeu.
+            Wifi_DisconnectAP();
+            if (isDSiMode())
+            {
+                systemReboot();
+                while (1)
+                    swiWaitForVBlank();
+            }
+            break;
+        }
     }
 
     // Retour au loader (TWiLight Menu++, hbmenu...) si possible

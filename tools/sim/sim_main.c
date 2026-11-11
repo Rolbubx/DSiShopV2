@@ -101,52 +101,66 @@ int main(int argc, char **argv)
     frames(2);
     save(dir, "01_accueil");
 
-    press(BTN_A);           // Affiche le focus
-    press(BTN_DOWN);
-    save(dir, "02_accueil_focus");
-
-    tap(128, 49);           // Wi-Fi
+    // Wi-Fi : connexion aux réseaux enregistrés
+    tap(128, 83);
     frames(2);
-    save(dir, "03_wifi");
-
-    tap(128, 49 + 38);      // Rechercher des réseaux
-    frames(31);
-    save(dir, "04_scan");
-
-    tap(100, 28 + 34 + 15); // Freebox-Salon (WPA2, pas enregistré)
-    frames(2);
-    // Tape quelques touches au clavier virtuel : "azer"
-    tap(5 + 12, 88 + 12);
-    tap(5 + 25 + 12, 88 + 12);
-    tap(5 + 50 + 12, 88 + 12);
-    hold_touch(5 + 75 + 12, 88 + 12);
-    save(dir, "05_mot_de_passe");
-    in.up = BTN_TOUCH; frames(1);
-
-    // Valide avec START (trop court : affiche un toast)
-    press(BTN_START);
-    frames(2);
-    save(dir, "06_mot_de_passe_trop_court");
-
-    // Annule et se connecte au réseau enregistré
-    tap(178, 178);          // Touche "Annuler" du clavier
-    frames(2);
-    tap(100, 28 + 15);      // Livebox (enregistré)
-    frames(20);
-    save(dir, "07_connexion");
-    frames(100);
-    save(dir, "08_connecte");
-
-    press(BTN_B);           // Retour accueil
-    frames(2);
-    tap(128, 49 + 38);      // Test Internet
-    frames(2);
-    tap(128, 95);           // Lancer
-    frames(3);
-    save(dir, "09_http");
-
+    tap(128, 47);
+    frames(120);
+    save(dir, "02_wifi_connecte");
     press(BTN_B);
-    tap(70, 49 + 76);       // À propos
+    frames(2);
+
+    // Installer un jeu
+    tap(128, 47);
+    frames(2);
+    save(dir, "03_installer");
+
+    // Ouvre le clavier en touchant le champ, tape "abc" puis OK
+    tap(128, 55);
+    frames(2);
+    tap(4 + 12, 88 + 12);                 // a
+    tap(4 + 5 * 25 + 12, 88 + 52 + 12);   // b (3e rangée : Maj w x c v b)
+    hold_touch(4 + 3 * 25 + 12, 88 + 52 + 12); // c
+    save(dir, "04_saisie_lien");
+    in.up = BTN_TOUCH; frames(1);
+    tap(228, 178);                        // OK
+    frames(2);
+
+    // Lance l'installation
+    tap(128, 95);
+    frames(90);
+    save(dir, "05_telechargement");
+    frames(110);
+    save(dir, "06_installe");
+
+    // Plus tard -> relance puis annule -> écran d'erreur
+    tap(128, 108 + 30 + 6 + 15);
+    frames(2);
+    tap(128, 95);
+    frames(40);
+    press(BTN_B);
+    frames(3);
+    save(dir, "07_erreur");
+
+    // Recherche de réseaux + mot de passe
+    press(BTN_B);
+    frames(2);
+    tap(128, 83);
+    frames(2);
+    tap(128, 47 + 36);
+    frames(31);
+    save(dir, "08_scan");
+    tap(100, 28 + 34 + 15);
+    frames(2);
+    tap(4 + 12, 88 + 12);
+    tap(4 + 25 + 12, 88 + 12);
+    save(dir, "09_mot_de_passe");
+
+    tap(178, 178);   // Annuler
+    press(BTN_B);    // Retour Wi-Fi
+    press(BTN_B);    // Retour accueil
+    frames(2);
+    tap(70, 155);    // À propos
     frames(2);
     save(dir, "10_a_propos");
     return 0;

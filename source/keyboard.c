@@ -8,16 +8,16 @@
 #define ROWS 3
 
 static const char *const layout_lower[ROWS] = {
-    "azertyuiop", "qsdfghjklm", "wxcvbn,.",
+    "azertyuiop", "qsdfghjklm", "wxcvbn./",
 };
 static const char *const layout_upper[ROWS] = {
-    "AZERTYUIOP", "QSDFGHJKLM", "WXCVBN;:",
+    "AZERTYUIOP", "QSDFGHJKLM", "WXCVBN-_",
 };
 static const char *const layout_sym1[ROWS] = {
-    "1234567890", "@#&_-+()/*", "!?'\"%=<>",
+    "1234567890", "@#&_-+()/*", ":;,.!?'\"",
 };
 static const char *const layout_sym2[ROWS] = {
-    "1234567890", "~`|\\^$[]{}", "!?'\"%=<>",
+    "1234567890", "~`|\\^$[]{}", "%=<>!?'\"",
 };
 
 static struct {

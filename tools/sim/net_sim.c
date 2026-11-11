@@ -19,8 +19,11 @@ static const net_ap_t fake_aps[] = {
 
 bool net_init(void) { return true; }
 
+void installer_sim_tick(void);
+
 void net_update(void)
 {
+    installer_sim_tick();
     if (state == NET_CONNECTING && ++connect_timer > 90)
         state = NET_CONNECTED;
 }

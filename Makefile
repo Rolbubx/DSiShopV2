@@ -51,9 +51,13 @@ DEFINES		:=
 # Cœur ARM7 avec DSWiFi (obligatoire pour le Wi-Fi)
 ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
 
-LIBS		:= -ldswifi9 -lnds9
+# HTTPS : Mbed TLS + libcurl + zlib (paquets à installer, voir le README) :
+#   wf-pacman -Sy toolchain-gcc-arm-none-eabi-zlib blocksds-mbedtls blocksds-libcurl
+LIBS		:= -ldswifi9 -lnds9 -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz
 LIBDIRS		:= $(BLOCKSDS)/libs/dswifi \
-		   $(BLOCKSDS)/libs/libnds
+		   $(BLOCKSDS)/libs/libnds \
+		   $(BLOCKSDSEXT)/mbedtls \
+		   $(BLOCKSDSEXT)/libcurl
 
 # Build artifacts
 # ---------------
