@@ -510,7 +510,7 @@ static void draw_top(canvas_t *c)
             ui_panel(c, r);
             int x = r.x + 8, w = r.w - 16, y = r.y + 6;
             int bottom = r.y + r.h - 4;
-            char line[420], size[24];
+            char line[600], size[24];
 
             format_size(size, sizeof(size), g->size);
             snprintf(line, sizeof(line), "%s · %s", g->version[0] ? g->version : "version inconnue",
