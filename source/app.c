@@ -9,6 +9,8 @@
 #include "gfx.h"
 #include "installer.h"
 #include "keyboard.h"
+#include "lremote.h"
+#include "lremote_glue.h"
 #include "net.h"
 #include "remote.h"
 #include "thirdparty/qrcodegen.h"
@@ -31,6 +33,7 @@ typedef enum {
     SCREEN_GAME,          // Fiche d'un jeu : mise à jour, sauvegardes...
     SCREEN_CONFIRM,       // Confirmation (désinstaller, effacer les sauvegardes...)
     SCREEN_REMOTE,        // QR code pour piloter la DSi depuis un téléphone
+    SCREEN_LR_EDIT,       // Clavier : identifiant / mot de passe du Remote local
     SCREEN_MORE,          // Test Internet, À propos, Quitter
 } app_screen_t;
 
@@ -40,6 +43,9 @@ typedef enum {
     CONFIRM_DELETE_SAVES,
     CONFIRM_RESTORE,
 } confirm_t;
+
+// Onglets de l'écran Remote
+enum { RTAB_LOCAL, RTAB_ONLINE };
 
 // Onglets de l'écran "Installer un jeu"
 enum { TAB_INSTALL, TAB_GAMES };
@@ -79,6 +85,13 @@ static struct {
     bool sel_backup;      // Une version précédente est disponible
     confirm_t confirm;
 
+    // Remote local : saisie des identifiants
+    int remote_tab;
+    char lr_user[LREMOTE_USER_MAX + 1];
+    char lr_pass[LREMOTE_PASS_MAX + 1];
+    int lr_field;         // 0 : identifiant, 1 : mot de passe
+    bool lr_editing;      // Formulaire affiché même si déjà configuré
+
     // QR code du Remote (recalculé seulement si l'URL change)
     char qr_text[200];
     bool qr_ok;
@@ -105,6 +118,7 @@ void app_init(bool wifi_ok)
     app.top_signature = 0xFFFFFFFF;
     snprintf(app.url, sizeof(app.url), "github.com/");
     app.last_inst_state = INST_IDLE;
+    app.remote_tab = RTAB_LOCAL;
     go(SCREEN_HOME);
 }
 
@@ -363,6 +377,13 @@ static int ui_tabs(canvas_t *c, rect_t r, const char *const *labels, int count,
 // Texte de statut du Remote pour l'accueil
 static void remote_summary(char *out, size_t size)
 {
+    if (lremote_enabled() && lremote_net_running())
+    {
+        int n = lremote_sessions();
+        snprintf(out, size, "Remote local : %s%s", lremote_glue_url(),
+                 n ? " (téléphone connecté)" : "");
+        return;
+    }
     switch (remote_state())
     {
         case REMOTE_PAIRED:
@@ -494,7 +515,8 @@ static void draw_top(canvas_t *c)
             ui_panel(c, r);
             char line[128];
             remote_summary(line, sizeof(line));
-            uint16_t dot = remote_state() == REMOTE_PAIRED ? COL_OK : COL_TEXT_OFF;
+            uint16_t dot = (remote_state() == REMOTE_PAIRED ||
+                            (lremote_enabled() && lremote_net_running())) ? COL_OK : COL_TEXT_OFF;
             gfx_fill_circle(c, r.x + 12, r.y + r.h / 2, 3, dot);
             gfx_text_box(c, &font_small, r.x + 22, r.y + (r.h - font_small.height) / 2,
                          r.w - 30, ALIGN_LEFT, line, COL_TEXT_DIM);
@@ -549,11 +571,31 @@ static void draw_top(canvas_t *c)
         }
 
         case SCREEN_REMOTE:
+        case SCREEN_LR_EDIT:
         {
-            gfx_text(c, &font_title, 12, 30, "Remote", COL_TEXT);
+            gfx_text(c, &font_title, 12, 30,
+                     app.remote_tab == RTAB_LOCAL ? "Remote local" : "Remote en ligne",
+                     COL_TEXT);
             rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
             ui_panel(c, r);
             int x = r.x + 8, y = r.y + 6;
+
+            if (app.remote_tab == RTAB_LOCAL)
+            {
+                y += gfx_text_wrap(c, &font_small, x, y, r.w - 16, 80,
+                                   "1. Connecte ton téléphone au même Wi-Fi que la DSi\n"
+                                   "2. Scanne le QR code (ou tape l'adresse)\n"
+                                   "3. Connecte-toi avec ton identifiant et ton mot de passe",
+                                   COL_TEXT_DIM);
+                y += 4;
+                gfx_hline(c, x, y, r.w - 16, COL_BORDER);
+                y += 6;
+                gfx_text_wrap(c, &font_small, x, y, r.w - 16, r.y + r.h - y - 4,
+                              "Seulement chez toi, DSi Shop ouvert. Pas de compte : "
+                              "c'est la DSi qui sert la page.",
+                              COL_TEXT_OFF);
+                break;
+            }
 
             if (remote_state() == REMOTE_NO_SERVER)
             {
@@ -869,6 +911,9 @@ static uint32_t top_signature(void)
     if (app.screen == SCREEN_INSTALL_DONE)
         MIX(reboot_seconds_left());
     MIX(time(NULL) / 60);
+    MIX(lremote_enabled());
+    MIX(lremote_net_running());
+    MIX(lremote_sessions());
     MIX(installer_checking());
     if (installer_checking())
     {
@@ -914,11 +959,22 @@ static void screen_home(canvas_t *c, const input_t *in)
     }
 
     const char *rsub = remote_state() == REMOTE_PAIRED ? "Connecté"
-                                                        : "QR code · téléphone";
+                     : lremote_enabled() ? "Local actif"
+                                         : "Local ou en ligne";
     if (ui_tile(c, RECT(132, 30, 116, 96), "Remote", rsub, ICON_QR, false))
     {
-        remote_start();
-        remote_request_pair_code();
+        // Onglet par défaut : en ligne s'il y a un serveur et que la DSi y est
+        // déjà associée, sinon le Remote local
+        if (remote_state() == REMOTE_NO_SERVER)
+            app.remote_tab = RTAB_LOCAL;
+        else if (remote_has_device() && !lremote_enabled())
+            app.remote_tab = RTAB_ONLINE;
+        if (app.remote_tab == RTAB_ONLINE)
+        {
+            remote_start();
+            remote_request_pair_code();
+        }
+        app.lr_editing = false;
         go(SCREEN_REMOTE);
     }
 
@@ -980,88 +1036,278 @@ static void screen_more(canvas_t *c, const input_t *in)
         go(SCREEN_HOME);
 }
 
+// Remote en ligne (serveur + compte Google)
+static bool remote_online(canvas_t *c)
+{
+    remote_state_t rs = remote_state();
+    const int col_x = 128, col_w = SCREEN_W - col_x - 8;
+
+    if (rs == REMOTE_NO_SERVER)
+    {
+        gfx_text_wrap(c, &font_small, 16, 56, SCREEN_W - 32, 90,
+                      "Aucun serveur Remote n'est configuré (voir l'écran du haut). "
+                      "Le Remote local, lui, marche sans serveur.", COL_TEXT_DIM);
+        return ui_button(c, RECT(BTN_X0, 150, BTN_W, 26), "Retour", BTN_STYLE_NORMAL, true);
+    }
+
+    rect_t qr = RECT(6, 50, 116, 116);
+    const char *url = remote_pair_url();
+
+    if (url[0])
+    {
+        draw_qr(c, qr, url);
+        gfx_text_box(c, &font_small, col_x, 52, col_w, ALIGN_LEFT,
+                     rs == REMOTE_PAIRED ? "Associer un autre :" : "Ou tape le code :",
+                     COL_TEXT_DIM);
+        gfx_text_box(c, &font_body, col_x, 52 + font_small.height, col_w, ALIGN_LEFT,
+                     remote_pair_code(), COL_TEXT);
+    }
+    else
+    {
+        gfx_fill_round_rect(c, qr.x + 6, qr.y + 6, qr.w - 12, qr.h - 12, 8, COL_PANEL);
+        if (rs == REMOTE_WAIT_WIFI)
+            gfx_text_wrap(c, &font_small, qr.x + 14, qr.y + 40, qr.w - 28, 60,
+                          "Connecte-toi d'abord au Wi-Fi", COL_TEXT_DIM);
+        else if (rs == REMOTE_ERROR)
+            gfx_text_wrap(c, &font_small, qr.x + 14, qr.y + 30, qr.w - 28, 80,
+                          remote_status_text(), COL_ERR);
+        else
+            ui_spinner(c, qr.x + qr.w / 2, qr.y + qr.h / 2, 8, app.frame, COL_ACCENT);
+    }
+
+    char line[96];
+    if (rs == REMOTE_PAIRED)
+        snprintf(line, sizeof(line), "Connecté à %s", remote_owner_name());
+    else
+        snprintf(line, sizeof(line), "%s", remote_status_text());
+    gfx_text_wrap(c, &font_small, col_x, 86, col_w, font_small.height * 3, line,
+                  rs == REMOTE_PAIRED ? COL_OK : COL_TEXT_DIM);
+
+    if (rs == REMOTE_WAIT_WIFI)
+    {
+        if (ui_button(c, RECT(col_x, 126, col_w, 22), "Wi-Fi", BTN_STYLE_PRIMARY,
+                      app.wifi_ok))
+            go(SCREEN_WIFI);
+    }
+    else if (rs == REMOTE_PAIRED)
+    {
+        if (ui_button(c, RECT(col_x, 126, col_w, 22), "Délier", BTN_STYLE_DANGER, true))
+        {
+            remote_forget();
+            ui_toast("DSi déliée : un nouveau QR code arrive");
+        }
+    }
+    else
+    {
+        if (ui_button(c, RECT(col_x, 126, col_w, 22), "Nouveau code", BTN_STYLE_NORMAL,
+                      rs == REMOTE_WAIT_PAIR))
+            remote_request_pair_code();
+    }
+
+    return ui_button(c, RECT(col_x, 152, col_w, 22), "Retour", BTN_STYLE_NORMAL, true);
+}
+
+// Mot de passe masqué (on voit seulement le dernier caractère tapé)
+static void masked(const char *pass, bool show_last, char *out, size_t size)
+{
+    size_t n = strlen(pass), o = 0;
+    for (size_t i = 0; i < n && o + 4 < size; i++)
+    {
+        if (show_last && i == n - 1)
+            out[o++] = pass[i];
+        else
+        {
+            memcpy(out + o, "\xE2\x80\xA2", 3); // •
+            o += 3;
+        }
+    }
+    out[o] = '\0';
+}
+
+// Remote local (la DSi sert la page elle-même)
+static bool remote_local(canvas_t *c)
+{
+    // 1. Pas encore d'identifiants (ou on les change) : formulaire
+    if (!lremote_configured() || app.lr_editing)
+    {
+        gfx_text(c, &font_small, 10, 50, "Identifiant", COL_TEXT_DIM);
+        rect_t fu = RECT(8, 62, SCREEN_W - 16, 24);
+        bool pressed, focused;
+        if (ui_hit(fu, true, &pressed, &focused))
+        {
+            app.lr_field = 0;
+            kbd_open(app.lr_user, sizeof(app.lr_user));
+            go(SCREEN_LR_EDIT);
+            return false;
+        }
+        draw_text_field(c, fu, app.lr_user, "ex. moi", false, focused || pressed);
+
+        char label[48];
+        snprintf(label, sizeof(label), "Mot de passe (%d caractères min.)", LREMOTE_PASS_MIN);
+        gfx_text(c, &font_small, 10, 90, label, COL_TEXT_DIM);
+        rect_t fp = RECT(8, 102, SCREEN_W - 16, 24);
+        if (ui_hit(fp, true, &pressed, &focused))
+        {
+            app.lr_field = 1;
+            kbd_open(app.lr_pass, sizeof(app.lr_pass));
+            go(SCREEN_LR_EDIT);
+            return false;
+        }
+        char hidden[LREMOTE_PASS_MAX * 3 + 1];
+        masked(app.lr_pass, false, hidden, sizeof(hidden));
+        draw_text_field(c, fp, hidden, "••••••", false, focused || pressed);
+
+        if (ui_button(c, RECT(8, 134, SCREEN_W - 16, 24), "Enregistrer et activer",
+                      BTN_STYLE_PRIMARY, app.lr_user[0] && app.lr_pass[0]))
+        {
+            char err[96];
+            if (lremote_set_credentials(app.lr_user, app.lr_pass, err, sizeof(err)))
+            {
+                memset(app.lr_pass, 0, sizeof(app.lr_pass));
+                app.lr_editing = false;
+                app.force_redraw = true;
+                ui_toast("Remote local activé");
+            }
+            else
+            {
+                ui_toast(err);
+            }
+        }
+        return ui_button(c, RECT(8, 164, SCREEN_W - 16, 22),
+                         app.lr_editing ? "Annuler" : "Retour", BTN_STYLE_NORMAL, true);
+    }
+
+    // 2. Configuré
+    const int col_x = 128, col_w = SCREEN_W - col_x - 8;
+    rect_t qr = RECT(6, 50, 116, 116);
+    const char *url = lremote_glue_url();
+    bool on = lremote_enabled();
+
+    if (on && url[0] && !lremote_glue_failed())
+    {
+        draw_qr(c, qr, url);
+    }
+    else
+    {
+        gfx_fill_round_rect(c, qr.x + 6, qr.y + 6, qr.w - 12, qr.h - 12, 8, COL_PANEL);
+        const char *why = !on ? "Remote local désactivé"
+                        : !url[0] ? "Connecte-toi d'abord au Wi-Fi"
+                                  : "Le serveur n'a pas pu démarrer";
+        gfx_text_wrap(c, &font_small, qr.x + 14, qr.y + 40, qr.w - 28, 60, why,
+                      lremote_glue_failed() ? COL_ERR : COL_TEXT_DIM);
+    }
+
+    int y = 50;
+    gfx_text(c, &font_small, col_x, y, "Adresse", COL_TEXT_DIM);
+    y += font_small.height;
+    char addr[40] = "—";
+    if (url[0])
+    {
+        snprintf(addr, sizeof(addr), "%s", url + 7); // Sans "http://"
+        addr[strcspn(addr, "/")] = '\0';            // ni "/" final
+    }
+    gfx_text_box(c, &font_body, col_x, y, col_w, ALIGN_LEFT, addr, COL_TEXT);
+    y += font_body.height + 2;
+    gfx_text(c, &font_small, col_x, y, "Identifiant", COL_TEXT_DIM);
+    y += font_small.height;
+    gfx_text_box(c, &font_body, col_x, y, col_w, ALIGN_LEFT, lremote_user(), COL_TEXT);
+    y += font_body.height + 2;
+
+    int n = lremote_sessions();
+    char line[48];
+    if (n)
+        snprintf(line, sizeof(line), "%d téléphone(s) connecté(s)", n);
+    else
+        snprintf(line, sizeof(line), on ? "En attente…" : "");
+    gfx_text_box(c, &font_small, col_x, y, col_w, ALIGN_LEFT, line,
+                 n ? COL_OK : COL_TEXT_OFF);
+
+    if (!url[0] && on)
+    {
+        if (ui_button(c, RECT(col_x, 130, col_w, 20), "Wi-Fi", BTN_STYLE_PRIMARY,
+                      app.wifi_ok))
+            go(SCREEN_WIFI);
+    }
+    else if (ui_button(c, RECT(col_x, 130, col_w, 20), on ? "Désactiver" : "Activer",
+                       on ? BTN_STYLE_DANGER : BTN_STYLE_PRIMARY, true))
+    {
+        lremote_set_enabled(!on);
+        ui_toast(on ? "Remote local désactivé" : "Remote local activé");
+    }
+
+    if (ui_button(c, RECT(col_x, 152, col_w / 2 - 2, 20), "Identif.", BTN_STYLE_NORMAL,
+                  true))
+    {
+        snprintf(app.lr_user, sizeof(app.lr_user), "%s", lremote_user());
+        app.lr_pass[0] = '\0';
+        app.lr_editing = true;
+        app.force_redraw = true;
+    }
+    return ui_button(c, RECT(col_x + col_w / 2 + 2, 152, col_w / 2 - 2, 20), "Retour",
+                     BTN_STYLE_NORMAL, true);
+}
+
 static void screen_remote(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Remote", NULL);
 
-    remote_state_t rs = remote_state();
-    const int col_x = 150, col_w = SCREEN_W - col_x - 8;
-    bool back = false;
-
-    if (rs == REMOTE_NO_SERVER)
+    const char *const tabs[2] = { "Local (Wi-Fi maison)", "En ligne (Google)" };
+    int tab = ui_tabs(c, RECT(8, 26, SCREEN_W - 16, 20), tabs, 2, app.remote_tab);
+    if (tab != app.remote_tab)
     {
-        gfx_text_wrap(c, &font_small, 16, 34, SCREEN_W - 32, 100,
-                      "Aucun serveur Remote n'est configuré. Regarde l'écran du "
-                      "haut pour savoir comment faire.", COL_TEXT_DIM);
-        back = ui_button(c, RECT(BTN_X0, 150, BTN_W, BTN_H), "Retour",
-                         BTN_STYLE_NORMAL, true);
+        app.remote_tab = tab;
+        if (tab == RTAB_ONLINE)
+        {
+            remote_start();
+            remote_request_pair_code();
+        }
+        app.force_redraw = true;
+    }
+
+    bool back = app.remote_tab == RTAB_LOCAL ? remote_local(c) : remote_online(c);
+
+    if (back || (in->down & BTN_B))
+    {
+        if (app.lr_editing)
+        {
+            app.lr_editing = false;
+            memset(app.lr_pass, 0, sizeof(app.lr_pass));
+            app.force_redraw = true;
+        }
+        else
+        {
+            go(SCREEN_HOME);
+        }
+    }
+}
+
+static void screen_lr_edit(canvas_t *c, const input_t *in)
+{
+    bool pass = app.lr_field == 1;
+    ui_header(c, pass ? "Mot de passe du Remote local" : "Identifiant du Remote local",
+              NULL);
+
+    gfx_text_box(c, &font_small, 10, 28, SCREEN_W - 20, ALIGN_LEFT,
+                 pass ? "6 caractères minimum. Il te sera demandé sur le téléphone."
+                      : "3 caractères minimum, sans espace.", COL_TEXT_DIM);
+
+    rect_t f = RECT(8, 42, SCREEN_W - 16, 26);
+    if (pass)
+    {
+        char hidden[LREMOTE_PASS_MAX * 3 + 1];
+        masked(app.lr_pass, true, hidden, sizeof(hidden));
+        draw_text_field(c, f, hidden, NULL, true, true);
     }
     else
     {
-        rect_t qr = RECT(6, 26, 140, 140);
-        const char *url = remote_pair_url();
-
-        if (url[0])
-        {
-            draw_qr(c, qr, url);
-            gfx_text_box(c, &font_small, col_x, 30, col_w, ALIGN_LEFT,
-                         rs == REMOTE_PAIRED ? "Associer un autre :" : "Ou tape le code :",
-                         COL_TEXT_DIM);
-            gfx_text_box(c, &font_body, col_x, 32 + font_small.height, col_w,
-                         ALIGN_LEFT, remote_pair_code(), COL_TEXT);
-        }
-        else
-        {
-            gfx_fill_round_rect(c, qr.x + 10, qr.y + 10, qr.w - 20, qr.h - 20, 8,
-                                COL_PANEL);
-            if (rs == REMOTE_WAIT_WIFI)
-                gfx_text_wrap(c, &font_small, qr.x + 20, qr.y + 50, qr.w - 40, 60,
-                              "Connecte-toi d'abord au Wi-Fi", COL_TEXT_DIM);
-            else if (rs == REMOTE_ERROR)
-                gfx_text_wrap(c, &font_small, qr.x + 20, qr.y + 40, qr.w - 40, 80,
-                              remote_status_text(), COL_ERR);
-            else
-                ui_spinner(c, qr.x + qr.w / 2, qr.y + qr.h / 2, 8, app.frame,
-                           COL_ACCENT);
-        }
-
-        // Statut sous le code
-        char line[96];
-        if (rs == REMOTE_PAIRED)
-            snprintf(line, sizeof(line), "Connecté à %s", remote_owner_name());
-        else
-            snprintf(line, sizeof(line), "%s", remote_status_text());
-        gfx_text_wrap(c, &font_small, col_x, 72, col_w, font_small.height * 3, line,
-                      rs == REMOTE_PAIRED ? COL_OK : COL_TEXT_DIM);
-
-        if (rs == REMOTE_WAIT_WIFI)
-        {
-            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Wi-Fi", BTN_STYLE_PRIMARY,
-                          app.wifi_ok))
-                go(SCREEN_WIFI);
-        }
-        else if (rs == REMOTE_PAIRED)
-        {
-            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Délier", BTN_STYLE_DANGER,
-                          true))
-            {
-                remote_forget();
-                ui_toast("DSi déliée : un nouveau QR code arrive");
-            }
-        }
-        else
-        {
-            if (ui_button(c, RECT(col_x, 112, col_w, 24), "Nouveau code",
-                          BTN_STYLE_NORMAL, rs == REMOTE_WAIT_PAIR))
-                remote_request_pair_code();
-        }
-
-        back = ui_button(c, RECT(col_x, 142, col_w, 24), "Retour", BTN_STYLE_NORMAL,
-                         true);
+        draw_text_field(c, f, app.lr_user, NULL, true, true);
     }
 
-    if (back || (in->down & BTN_B))
-        go(SCREEN_HOME);
+    if (kbd_update(c, in, 88) != KBD_EDITING)
+    {
+        app.lr_editing = lremote_configured(); // Garde le formulaire ouvert
+        go(SCREEN_REMOTE);
+    }
 }
 
 static void screen_wifi(canvas_t *c, const input_t *in)
@@ -1803,7 +2049,8 @@ static void handle_background_events(void)
     }
 
     remote_event_t ev;
-    while ((ev = remote_poll_event()) != REMOTE_EV_NONE)
+    while ((ev = remote_poll_event()) != REMOTE_EV_NONE ||
+           (ev = lremote_glue_poll_event()) != REMOTE_EV_NONE)
     {
         switch (ev)
         {
@@ -1843,7 +2090,7 @@ void app_frame(const input_t *in)
     bool bottom_needed = app.force_redraw || state_changed || ui_wants_redraw() ||
                          in->down || in->up || in->repeat ||
                          app.screen == SCREEN_PASSWORD || // Curseur clignotant
-                         app.screen == SCREEN_URL ||
+                         app.screen == SCREEN_URL || app.screen == SCREEN_LR_EDIT ||
                          app.screen == SCREEN_INSTALL_DONE ||
                          (app.screen == SCREEN_INSTALL && install_busy()) ||
                          (app.screen == SCREEN_REMOTE && remote_pair_url()[0] == '\0');
@@ -1870,6 +2117,7 @@ void app_frame(const input_t *in)
             case SCREEN_GAME:     screen_game(c, in); break;
             case SCREEN_CONFIRM:  screen_confirm(c, in); break;
             case SCREEN_REMOTE:   screen_remote(c, in); break;
+            case SCREEN_LR_EDIT:  screen_lr_edit(c, in); break;
             case SCREEN_MORE:     screen_more(c, in); break;
         }
 

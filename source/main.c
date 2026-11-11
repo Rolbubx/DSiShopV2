@@ -8,6 +8,7 @@
 #include "input.h"
 #include "installer.h"
 #include "net.h"
+#include "lremote_glue.h"
 #include "remote.h"
 
 static void read_input(input_t *in)
@@ -46,6 +47,7 @@ int main(int argc, char **argv)
     installer_init();
     bool wifi_ok = net_init();
     remote_init();
+    lremote_glue_init();
     app_init(wifi_ok);
 
     // Connexion automatique aux réseaux enregistrés dans la console
@@ -58,6 +60,7 @@ int main(int argc, char **argv)
         remote_start();
 
     input_t in = { 0 };
+    unsigned int frame = 0;
 
     while (1)
     {
@@ -69,6 +72,13 @@ int main(int argc, char **argv)
 
         read_input(&in);
         net_update();
+
+        // Remote local : démarre/arrête le serveur, répond aux requêtes. Les
+        // entrées et le timer servent aussi de source d'aléatoire.
+        uint32_t noise[3] = { in.held, (uint32_t)(in.tx << 16 | in.ty), REG_VCOUNT };
+        lremote_glue_entropy(noise, sizeof(noise));
+        lremote_glue_update(frame++);
+
         app_frame(&in);
 
         if (app_should_quit())

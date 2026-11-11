@@ -15,10 +15,13 @@ Application homebrew pour **Nintendo DSi** (une appli, pas un jeu), écrite en C
   **mettre à jour**, **revenir à la version précédente**, **supprimer les
   sauvegardes**, **désinstaller**. Le bouton *Vérifier les màj* contrôle tous les jeux
   d'un coup.
-- **Remote** : la DSi affiche un **QR code**. Tu le scannes avec ton téléphone, tu te
-  connectes avec ton **compte Google**, et tu pilotes la DSi depuis le site :
-  installer, chercher sur GitHub, désinstaller, annuler, redémarrer. Ça nécessite le
-  petit serveur de [`remote-server/`](remote-server/README.md), à héberger.
+- **Remote**, deux façons de piloter la DSi depuis un téléphone (installer, mettre à
+  jour, chercher sur GitHub, désinstaller, annuler, redémarrer) :
+  - **Local** : la DSi sert elle-même la page sur ton Wi-Fi. Tu choisis un
+    **identifiant et un mot de passe** sur la DSi, tu scannes le QR code, tu te
+    connectes. Aucun compte, aucun serveur, mais seulement à la maison.
+  - **En ligne** : connexion avec un **compte Google**, de n'importe où, via le petit
+    serveur de [`remote-server/`](remote-server/README.md) (à héberger).
 - **Installer un jeu depuis un lien** : tu tapes le lien d'un projet GitHub (ou l'URL
   directe d'un `.nds`, `.dsi` ou `.zip`), tu appuies sur *Installer* : l'appli récupère
   la dernière release, télécharge le fichier en HTTPS, extrait la ROM si c'est un zip,
@@ -57,6 +60,11 @@ source/
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
   remote_proto.c/.h  protocole texte DSi <-> serveur (portable, testé sur PC)
+  lremote.c/.h  Remote local : identifiants, sessions, HTTP, JSON (portable)
+  lremote_net.c serveur TCP non bloquant (sockets BSD, portable)
+  lremote_glue.c  liaison Remote local <-> installeur / jeux / redémarrage
+  web/          page du Remote local (intégrée par tools/gen_page.py)
+  sha256.c/.h   SHA-256 (empreinte du mot de passe, aléatoire)
   thirdparty/qrcodegen  générateur de QR codes de Nayuki (licence MIT)
   font.h        format des polices
   font_data.c   polices générées (ne pas éditer)
@@ -173,7 +181,37 @@ Si le jeu plante après une mise à jour, **Supprimer les sauvegardes** efface
 rangent leurs données ailleurs (leur propre dossier sur la SD) ne sont pas concernés.
 La désinstallation garde les sauvegardes, pour les retrouver si tu réinstalles.
 
-## Remote : mise en route
+## Remote local
+
+![Remote local](docs/screenshots-remote.png)
+
+Sur la DSi : **Remote**, onglet **Local**, choisis un identifiant (3 caractères min.)
+et un mot de passe (6 min.), puis **Enregistrer et activer**. La DSi affiche un QR
+code vers `http://<son adresse IP>/`. Sur ton téléphone, connecté au **même Wi-Fi**,
+scanne-le et connecte-toi.
+
+<img src="docs/remote-local-web.png" alt="Page du Remote local" width="320">
+
+Le serveur web tourne sur la DSi (port 80) tant que DSi Shop est ouvert, et il
+redémarre tout seul au lancement suivant s'il est activé. Il est servi par
+`source/lremote.c` (HTTP, sessions, JSON) et `source/lremote_net.c` (sockets non
+bloquantes, traitées à chaque frame). La page vient de `source/web/` (lance
+`python3 tools/gen_page.py` après une modification).
+
+Sécurité :
+- le mot de passe n'est **jamais stocké** : `sd:/_dsishop/local.cfg` contient
+  l'identifiant, un sel aléatoire et une empreinte SHA-256 (2000 tours) ;
+- session par cookie aléatoire de 256 bits, `HttpOnly`, `SameSite=Strict`, 12 h ;
+- **5 essais ratés = blocage** de 30 s, puis 1 min, 2 min… (5 min max) ;
+- les requêtes d'écriture exigent l'en-tête `X-DSiShop` (protection CSRF), et seule
+  une **adresse IP** est acceptée comme nom d'hôte (protection contre le « DNS
+  rebinding ») ;
+- commandes revalidées sur la DSi (noms de fichiers sans dossier, liens sans espace).
+
+Limite : la page est en HTTP simple, comme toutes les pages d'appareils locaux (box,
+imprimantes…). Sur un Wi-Fi public, préfère le Remote en ligne.
+
+## Remote en ligne : mise en route
 
 1. Héberge le serveur : voir [`remote-server/README.md`](remote-server/README.md)
    (identifiant Google, Docker, HTTPS).
@@ -199,9 +237,8 @@ permet). Mais la **connexion Google** est impossible dans ce cas :
 - elle ne serait joignable que depuis le même Wi-Fi, et seulement quand elle est
   allumée sur DSi Shop.
 
-Un mode « Remote local » sans compte Google est possible (le QR code pointerait
-vers la DSi, protégé par un code secret affiché à l'écran), mais il ne marcherait
-qu'à la maison, sur le même Wi-Fi.
+D'où les deux modes : le **Remote local** (la DSi sert la page, identifiant + mot de
+passe, à la maison) et le **Remote en ligne** (serveur + Google, de partout).
 
 ## Ajouter un écran
 

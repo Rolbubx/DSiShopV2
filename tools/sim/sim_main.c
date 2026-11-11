@@ -9,6 +9,8 @@
 
 #include "../../source/app.h"
 #include "../../source/games.h"
+#include "../../source/lremote.h"
+#include "../../source/lremote_glue.h"
 #include "../../source/gfx.h"
 #include "../../source/input.h"
 #include "../../source/net.h"
@@ -131,6 +133,8 @@ int main(int argc, char **argv)
 
     gfx_init();
     app_init(net_init());
+    // Remote local : vraie configuration (fichier dans le dossier de sortie)
+    lremote_glue_init();
     frames(2);
     save(dir, "01_menu");
 
@@ -142,60 +146,41 @@ int main(int argc, char **argv)
     press(BTN_B);
     frames(2);
 
-    // Remote : QR code, puis un téléphone se connecte
+    // Remote -> onglet Local : formulaire identifiant / mot de passe
     tap(190, 78);
-    frames(25);
-    save(dir, "02_remote_qr");
-    remote_sim_pair("Alice", "alice@example.com");
+    frames(2);
+    save(dir, "02_remote_local_config");
+
+    tap(128, 74);              // Champ identifiant -> clavier
+    frames(2);
+    tap(4 + 12, 88 + 12);      // a
+    tap(4 + 25 + 12, 88 + 12); // z
+    tap(4 + 50 + 12, 88 + 12); // e
+    press(BTN_START);          // Valider
+    frames(2);
+    tap(128, 114);             // Champ mot de passe -> clavier
+    frames(2);
+    for (int k = 0; k < 6; k++)
+        tap(4 + k * 25 + 12, 88 + 12);   // azerty
+    save(dir, "03_saisie_mot_de_passe");
+    press(BTN_START);
+    frames(2);
+    save(dir, "04_formulaire_rempli");
+    tap(128, 146);             // Enregistrer et activer
     frames(3);
+    // Démarre le vrai serveur sur un port de test (le simulateur n'appelle
+    // pas lremote_glue_update, qui écouterait sur le port 80)
+    lremote_net_start(18080);
+    frames(3);
+    save(dir, "05_remote_local_qr");
+
+    // Onglet En ligne
+    tap(188, 36);
+    frames(25);
+    save(dir, "06_remote_en_ligne");
     press(BTN_B);
     frames(2);
-
-    // Installer un jeu
-    tap(66, 78);
-    frames(2);
-    tap(128, 113);
-    frames(90);
-    save(dir, "03_telechargement");
-    frames(110);
-    tap(128, 108 + 36 + 15);   // Plus tard
-    frames(2);
-
-    // Mes jeux -> vérifier les mises à jour
-    tap(188, 36);
-    frames(2);
-    tap(94, SCREEN_H - 17);
-    frames(15);
-    save(dir, "04_verification");
-    frames(40);
-    save(dir, "05_mises_a_jour");
-
-    // Fiche de Pong (mise à jour disponible)
-    tap(100, 52 + 36 + 16);
-    frames(2);
-    save(dir, "06_fiche_jeu");
-
-    // Mettre à jour
-    tap(128, 44 + 12);
-    frames(90);
-    save(dir, "07_maj_en_cours");
-    frames(110);
-    save(dir, "08_maj_terminee");
-    tap(128, 108 + 36 + 15);   // Plus tard
-    frames(2);
-
-    // Retour sur la fiche : version précédente disponible, sauvegardes gardées
-    tap(188, 36);
-    frames(2);
-    tap(100, 52 + 36 + 16);
-    frames(2);
-    save(dir, "09_fiche_apres_maj");
-
-    // Supprimer les sauvegardes (confirmation)
-    tap(128, 44 + 2 * 28 + 12);
-    frames(2);
-    save(dir, "10_supprimer_sauvegardes");
-    tap(128, 106 + 15);
-    frames(3);
-    return 0;
+    save(dir, "07_menu_remote_actif");
+    lremote_net_stop();
+        return 0;
 }
