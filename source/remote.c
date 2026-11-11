@@ -149,8 +149,10 @@ static void load_config(void)
         if (fgets(line, sizeof(line), f))
         {
             trim(line);
-            if (strncmp(line, "https://", 8) == 0 || strncmp(line, "http://", 7) == 0)
-                snprintf(rm.server, sizeof(rm.server), "%s", line);
+            // Adresse trop longue : ignorée plutôt que tronquée
+            bool scheme = strncmp(line, "https://", 8) == 0 || strncmp(line, "http://", 7) == 0;
+            if (scheme && strlen(line) < sizeof(rm.server))
+                snprintf(rm.server, sizeof(rm.server), "%.191s", line);
         }
         fclose(f);
     }
