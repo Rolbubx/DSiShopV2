@@ -7,3 +7,4 @@ compile_commands.json
 image.bin
 tools/sim/dsishop_sim
 screenshots/
+tools/test/test_zip
