@@ -135,6 +135,8 @@ void installer_twl_progress(int *pack, int *packs, uint64_t *now, uint64_t *tota
 
 // Chemin de DSi Shop sur la carte (argv[0]), à donner au démarrage
 void installer_set_self_path(const char *path);
+// Détail de l'initialisation de la carte SD (pour diagnostiquer un échec)
+const char *installer_storage_info(void);
 // Possible seulement avec TWiLight Menu++ sur la SD et un chemin connu
 bool installer_autoboot_available(void);
 bool installer_autoboot_get(void);

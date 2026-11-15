@@ -1,6 +1,7 @@
 // Installation de jeux depuis GitHub ou une URL directe
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1039,9 +1040,40 @@ static int install_thread(void *arg)
 // API publique
 // ---------------------------------------------------------------------------
 
+// Détail de l'initialisation de la carte SD (affiché dans "À propos" si elle
+// n'est pas trouvée)
+static char storage_info[160];
+
+const char *installer_storage_info(void)
+{
+    return storage_info;
+}
+
 bool installer_init(void)
 {
+    const char *argv0 = (__system_argv->argvMagic == ARGV_MAGIC && __system_argv->argc >= 1)
+                            ? __system_argv->argv[0] : "(aucun)";
+
     inst.storage_ok = fatInitDefault();
+    int err = errno;
+
+    // fatInitDefault() renvoie "échec" dès qu'un lecteur exigé par le chemin de
+    // lancement manque (ex. argv[0] en "fat:/..." sans lecteur de linker), alors
+    // que la carte SD interne est déjà montée : on regarde donc directement si
+    // "sd:/" est lisible, quoi qu'en dise fatInitDefault().
+    if (!inst.storage_ok && isDSiMode())
+    {
+        DIR *d = opendir("sd:/");
+        if (d)
+        {
+            closedir(d);
+            inst.storage_ok = true;
+        }
+    }
+
+    snprintf(storage_info, sizeof(storage_info), "%s | %s | argv0 : %.80s | errno %d",
+             inst.storage_ok ? "SD ok" : "SD absente", isDSiMode() ? "mode DSi" : "mode DS",
+             argv0, err);
 
     // En mode DSi on utilise la carte SD interne, sinon le linker (DLDI)
     snprintf(inst.root, sizeof(inst.root), "%s", isDSiMode() ? "sd:" : "fat:");

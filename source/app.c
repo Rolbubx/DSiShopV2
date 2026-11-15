@@ -2371,6 +2371,10 @@ static void screen_about(canvas_t *c, const input_t *in)
     gfx_text_box(c, &font_title, 0, 30, SCREEN_W, ALIGN_CENTER, APP_NAME, COL_TEXT);
     gfx_text_box(c, &font_small, 0, 30 + font_title.height, SCREEN_W, ALIGN_CENTER,
                  "Version " APP_VERSION, COL_TEXT_DIM);
+    // Carte SD introuvable : on montre pourquoi (à me communiquer pour corriger)
+    if (!installer_storage_ok())
+        gfx_text_wrap(c, &font_small, 8, SCREEN_H - 30, SCREEN_W - 16, 28,
+                      installer_storage_info(), COL_WARN);
 
     // Mise à jour de DSi Shop lui-même (dernière release GitHub du projet)
     self_state_t st = installer_self_state();

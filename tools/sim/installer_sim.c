@@ -364,6 +364,7 @@ static void twl_sim_tick(void)
 // Lancement de DSi Shop au démarrage : gardé en mémoire
 static bool autoboot_on;
 void installer_set_self_path(const char *path) { (void)path; }
+const char *installer_storage_info(void) { return "SD ok | simulateur"; }
 bool installer_autoboot_available(void) { return true; }
 bool installer_autoboot_get(void) { return autoboot_on; }
 bool installer_autoboot_set(bool on) { autoboot_on = on; return true; }
