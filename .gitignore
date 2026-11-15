@@ -1,0 +1,10 @@
+# Build BlocksDS
+build/
+*.nds
+*.elf
+image.bin
+compile_commands.json
+
+# Serveur de catalogue
+catalog.json
+__pycache__/
