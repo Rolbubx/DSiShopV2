@@ -182,17 +182,23 @@ int main(int argc, char **argv)
     frames(2);
     save(dir, "07_menu_remote_actif");
 
-    // Plus -> Mettre à jour TWiLight Menu++
+    // Plus -> Réglages (thème, Verbose, démarrage)
     press(BTN_B);
     frames(2);
     tap(214, 147);             // Raccourci "Plus"
     frames(2);
     save(dir, "08_plus");
-    tap(128, 60);              // Au démarrage : bascule sur DSi Shop
+    tap(128, 67);              // Réglages
     frames(2);
-    save(dir, "08b_plus_demarrage");
+    save(dir, "08b_reglages");
+    tap(128, 107);             // Au démarrage : bascule sur DSi Shop
+    frames(2);
+    save(dir, "08c_reglages_demarrage");
+    tap(128, 139);             // Retour
     frames(200);               // Laisse le message disparaître
-    tap(128, 37);              // Mettre à jour TWiLight Menu++
+
+    // Plus -> Mettre à jour TWiLight Menu++
+    tap(128, 40);
     frames(30);
     save(dir, "09_twilight_version");
     tap(128, 119);             // Mettre à jour
@@ -204,7 +210,7 @@ int main(int argc, char **argv)
     // Plus -> À propos -> mise à jour de DSi Shop
     press(BTN_B);
     frames(2);
-    tap(128, 129);             // À propos
+    tap(128, 121);             // À propos
     frames(2);
     tap(128, 117);             // Rechercher une mise à jour
     frames(30);
@@ -214,6 +220,53 @@ int main(int argc, char **argv)
     save(dir, "13_a_propos_telechargement");
     frames(60);
     save(dir, "14_a_propos_termine");
+
+    // Installation SANS Verbose : pré-description simple, puis annulation
+    press(BTN_B);              // À propos -> Plus
+    frames(2);
+    tap(128, 67);              // Réglages
+    frames(2);
+    tap(128, 75);              // Verbose : NON
+    frames(2);
+    save(dir, "15_verbose_non");
+    press(BTN_B);              // -> Plus
+    frames(2);
+    press(BTN_B);              // -> accueil
+    frames(2);
+    tap(66, 78);               // Installer un jeu
+    frames(2);
+    tap(70, 113);              // Installer
+    frames(10);
+    save(dir, "16_install_resolution");
+    frames(30);
+    save(dir, "17_preview_simple");
+    tap(128, 149);             // Annuler
+    frames(5);
+
+    // Installation AVEC Verbose (réglage par défaut) : confirmation puis journal
+    press(BTN_B);              // -> accueil
+    frames(2);
+    tap(214, 147);             // Plus
+    frames(2);
+    tap(128, 67);              // Réglages
+    frames(2);
+    tap(128, 75);              // Verbose : OUI
+    frames(2);
+    save(dir, "18_verbose_oui");
+    press(BTN_B);
+    frames(2);
+    press(BTN_B);
+    frames(2);
+    tap(66, 78);               // Installer un jeu
+    frames(2);
+    tap(70, 113);              // Installer
+    frames(40);
+    save(dir, "19_preview_detaillee");
+    tap(128, 113);             // Confirmer
+    frames(90);
+    save(dir, "20_install_detaillee");
+    frames(200);
+    save(dir, "21_install_terminee");
     lremote_net_stop();
         return 0;
 }

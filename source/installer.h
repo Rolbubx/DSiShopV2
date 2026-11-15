@@ -14,6 +14,7 @@
 typedef enum {
     INST_IDLE,
     INST_RESOLVING,    // Interrogation de l'API GitHub
+    INST_PREVIEW,      // Pré-description affichée : attend la confirmation
     INST_DOWNLOADING,  // Téléchargement du fichier
     INST_EXTRACTING,   // Extraction du .zip
     INST_VERIFYING,    // Vérification de la ROM
@@ -163,6 +164,40 @@ self_state_t installer_self_state(void);
 const char *installer_self_message(void);  // Message d'erreur
 const char *installer_self_latest(void);   // Version publiée, ex. "v0.6.0"
 bool installer_self_newer(void);           // Plus récente que celle qui tourne
+
+// ---------------------------------------------------------------------------
+// Pré-description et mode détaillé
+// ---------------------------------------------------------------------------
+//
+// Avant de télécharger, une installation lancée depuis la console (pas depuis
+// le Remote, ni une mise à jour) s'arrête à l'état INST_PREVIEW : l'écran
+// montre ce qui va être installé et attend installer_confirm() (ou
+// installer_cancel()).
+//
+// Le réglage "Verbose" (oui par défaut, mémorisé sur la carte SD) rend les
+// messages d'étape plus précis et tient un journal des étapes avec leur durée.
+
+typedef struct {
+    char name[128];     // Fichier à installer
+    char project[64];   // Nom du projet GitHub ("" si lien direct)
+    char author[40];    // Propriétaire du projet GitHub ("" si inconnu)
+    char version[64];   // Version (tag de release GitHub) ("" si inconnue)
+    char source[120];   // "github.com/auteur/projet" ou nom du site
+    uint64_t size;      // Taille du téléchargement (0 : inconnue)
+    bool archive;       // .zip : la ROM en sera extraite
+    bool github;
+} install_info_t;
+
+const install_info_t *installer_preview_info(void);
+void installer_confirm(void);
+
+bool installer_verbose(void);
+void installer_set_verbose(bool on);
+// Journal des étapes (le plus ancien en premier ; vide si Verbose est coupé)
+int installer_log_count(void);
+const char *installer_log_get(int index);
+// Débit du téléchargement en cours, en octets par seconde (0 : pas encore connu)
+uint64_t installer_speed(void);
 
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);

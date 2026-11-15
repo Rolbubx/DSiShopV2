@@ -40,7 +40,7 @@ bool installer_init(void) { return true; }
 bool installer_storage_ok(void) { return true; }
 const char *installer_dir(void) { return sim_games_dir; }
 void installer_setup_tls(void *curl) { (void)curl; }
-uint64_t installer_free_space(void) { return 3ull << 30; }
+uint64_t installer_free_space(void) { return 16ull << 30; }
 bool installer_was_remote(void) { return remote; }
 bool installer_last_was_update(void) { return updating; }
 bool installer_up_to_date(void) { return up_to_date; }
@@ -57,15 +57,59 @@ static void set_result(const char *file, upd_status_t st, const char *latest)
     snprintf(upd[i].latest, sizeof(upd[i].latest), "%s", latest);
 }
 
+// Pré-description et mode détaillé (simulés)
+static bool previewed, verbose_on = true;
+static install_info_t info = {
+    .name = "MonJeu-v1.2.zip", .project = "monjeu", .author = "auteur",
+    .version = "v1.2.0", .source = "github.com/auteur/monjeu",
+    .size = 6764573491ull, .archive = true, .github = true,
+};
+static char log_buf[16][96];
+static int log_n;
+
+static void slog(const char *text)
+{
+    if (!verbose_on)
+        return;
+    snprintf(log_buf[log_n % 16], 96, "[%ds] %s", timer / 60, text);
+    log_n++;
+}
+
+const install_info_t *installer_preview_info(void) { return &info; }
+bool installer_verbose(void) { return verbose_on; }
+void installer_set_verbose(bool on) { verbose_on = on; }
+int installer_log_count(void) { return log_n < 16 ? log_n : 16; }
+const char *installer_log_get(int i)
+{
+    int n = installer_log_count();
+    return (i < 0 || i >= n) ? "" : log_buf[(log_n - n + i) % 16];
+}
+uint64_t installer_speed(void) { return state == INST_DOWNLOADING ? 2200ull * 1024 * 1024 / 120 / 6 : 0; }
+
+void installer_confirm(void)
+{
+    if (state == INST_PREVIEW)
+    {
+        state = INST_RESOLVING;
+        timer = 29;                // Le prochain tick lance le téléchargement
+        slog("Confirmé");
+    }
+}
+
 static bool start(bool from_remote)
 {
     if (state >= INST_RESOLVING && state <= INST_VERIFYING)
         return false;
     remote = from_remote;
     up_to_date = false;
+    previewed = false;
+    log_n = 0;
     state = INST_RESOLVING;
     timer = 0;
-    snprintf(msg, sizeof(msg), "Recherche de la dernière release sur GitHub…");
+    snprintf(msg, sizeof(msg), verbose_on ? "Recherche de la dernière release de auteur/monjeu sur GitHub…"
+                                          : "Recherche de la dernière release sur GitHub…");
+    slog("Installation : github.com/auteur/monjeu");
+    slog("Projet GitHub : auteur/monjeu");
     return true;
 }
 
@@ -170,17 +214,32 @@ void installer_sim_tick(void)
 
     if (state < INST_RESOLVING || state > INST_VERIFYING)
         return;
+    if (state == INST_PREVIEW)
+        return;                    // Attend la confirmation
     timer++;
+    if (timer == 30 && !updating && !remote && !previewed)
+    {
+        previewed = true;
+        state = INST_PREVIEW;
+        snprintf(msg, sizeof(msg), "Vérifie les informations, puis confirme");
+        slog("Release v1.2.0 : MonJeu-v1.2.zip (6,3 Go)");
+        slog("En attente de ta confirmation");
+        return;
+    }
     if (timer == 30)
     {
         state = INST_DOWNLOADING;
+        slog("Téléchargement depuis dsi-shop.duckdns.org");
         total = updating ? 160 * 1024 : 6764573491ull; // ~6,3 Go : découpé en morceaux
         snprintf(msg, sizeof(msg), "Téléchargement de %s…", updating ? "pong-v1.1.0.nds" : name);
     }
     if (state == INST_DOWNLOADING)
         now = total * (uint64_t)(timer - 30) / 120;
+    if (timer == 90)
+        slog("Téléchargé : 50 % (3,1 Go sur 6,3 Go)");
     if (timer == 150)
     {
+        slog("Téléchargement terminé : 6,3 Go en 2 s, 2,2 Go/s");
         state = INST_EXTRACTING;
         now = 0;
         snprintf(msg, sizeof(msg), "Extraction de l'archive (7 morceaux de 1 Go)…");

@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <time.h>
 
 #include <curl/curl.h>
 #include <fat.h>
@@ -18,6 +20,7 @@
 
 #include "games.h"
 #include "installer.h"
+#include "instinfo.h"
 #include "splitfile.h"
 #include "sysupdate.h"
 #include "twlini.h"
@@ -66,6 +69,16 @@ static struct {
     bool space_checked;
     bool no_space;
     uint64_t space_needed, space_free;
+
+    // Pré-description, mode détaillé
+    install_info_t info;
+    volatile bool confirmed;   // L'utilisateur a confirmé l'installation
+    bool verbose;
+    time_t start_time;         // Début de l'installation (pour le journal)
+    uint64_t head_size;        // Taille annoncée par une requête HEAD (0 : inconnue)
+    time_t speed_t;            // Mesure du débit : dernière seconde échantillonnée
+    uint64_t speed_bytes, speed;
+    int next_log_pct;          // Prochain palier de progression à écrire dans le journal
 
     // En-têtes HTTP du dernier téléchargement (pour détecter les mises à jour)
     char etag[80];
@@ -136,8 +149,43 @@ static void set_msg(const char *fmt, const char *arg)
     snprintf(inst.msg, sizeof(inst.msg), fmt, arg ? arg : "");
 }
 
+// Journal des étapes (mode détaillé) : les 16 dernières lignes
+#define LOG_LINES 16
+#define LOG_LEN   96
+static char log_lines[LOG_LINES][LOG_LEN];
+static int log_total;
+
+static void vlog(const char *fmt, ...)
+{
+    if (!inst.verbose)
+        return;
+    char *dst = log_lines[log_total % LOG_LINES];
+    int n = snprintf(dst, LOG_LEN, "[%ds] ", (int)(time(NULL) - inst.start_time));
+    if (n < 0 || n >= LOG_LEN)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(dst + n, LOG_LEN - n, fmt, ap);
+    va_end(ap);
+    log_total++;
+}
+
+int installer_log_count(void)
+{
+    return log_total < LOG_LINES ? log_total : LOG_LINES;
+}
+
+const char *installer_log_get(int index)
+{
+    int count = installer_log_count();
+    if (index < 0 || index >= count)
+        return "";
+    return log_lines[(log_total - count + index) % LOG_LINES];
+}
+
 static int fail(const char *msg)
 {
+    vlog("Échec : %.70s", msg);
     set_msg("%s", msg);
     inst.state = INST_ERROR;
     return -1;
@@ -352,6 +400,28 @@ static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
     if (inst.cancel)
         return 1;
 
+    if (inst.file_transfer)
+    {
+        // Débit : octets reçus pendant la dernière seconde écoulée
+        time_t t = time(NULL);
+        if (t != inst.speed_t)
+        {
+            if (inst.speed_t != 0 && t > inst.speed_t)
+                inst.speed = ((uint64_t)dlnow - inst.speed_bytes) / (uint64_t)(t - inst.speed_t);
+            inst.speed_t = t;
+            inst.speed_bytes = (uint64_t)dlnow;
+        }
+        // Journal : un point tous les 25 %
+        if (inst.verbose && dltotal > 0 && (int)((uint64_t)dlnow * 100 / (uint64_t)dltotal) >= inst.next_log_pct)
+        {
+            char a[24], b[24];
+            format_size(a, sizeof(a), (uint64_t)dlnow);
+            format_size(b, sizeof(b), (uint64_t)dltotal);
+            vlog("Téléchargé : %d %% (%s sur %s)", inst.next_log_pct, a, b);
+            inst.next_log_pct += 25;
+        }
+    }
+
     // Dès que la taille est connue, on vérifie qu'il y a la place sur la SD
     if (inst.file_transfer && !inst.space_checked && dltotal > 0)
     {
@@ -440,6 +510,10 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
 
     inst.etag[0] = '\0';
     inst.modified[0] = '\0';
+    inst.head_size = 0;
+    inst.speed_t = 0;
+    inst.speed_bytes = inst.speed = 0;
+    inst.next_log_pct = 25;
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     inst.file_transfer = file != NULL;
 
@@ -467,6 +541,13 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
 
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (!file && !mem && res == CURLE_OK)
+    {
+        // Requête HEAD : taille annoncée par le serveur
+        curl_off_t cl = -1;
+        curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        inst.head_size = cl > 0 ? (uint64_t)cl : 0;
+    }
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
@@ -662,6 +743,9 @@ static bool github_repo_of_download(const char *url, char *api_url, size_t size)
 
 // Choisit le meilleur fichier de la release : extension préférée d'abord
 // (celle de la version installée, lors d'une mise à jour), puis .nds > .dsi > .zip
+// Taille (0 : inconnue) du fichier choisi par le dernier pick_asset()
+static uint64_t last_asset_size;
+
 static bool pick_asset(const char *json, const char *prefer_ext, char *tag,
                        size_t tag_size, char *url_out, size_t url_size,
                        char *name_out, size_t name_size)
@@ -683,6 +767,7 @@ static bool pick_asset(const char *json, const char *prefer_ext, char *tag,
             basename_from_url(url, name, sizeof(name));
             if (ends_with_ci(name, exts[e]))
             {
+                last_asset_size = instinfo_asset_size(json, pos);
                 snprintf(url_out, url_size, "%s", url);
                 snprintf(name_out, name_size, "%s", name);
                 return true;
@@ -719,13 +804,29 @@ static int github_latest(const char *api_url, const char *prefer_ext, char *tag,
 static int resolve_github(const char *api_url, const char *prefer_ext)
 {
     inst.state = INST_RESOLVING;
-    set_msg("Recherche de la dernière release sur GitHub…", NULL);
+    char owner[40] = "", repo[64] = "";
+    instinfo_repo_of_api_url(api_url, owner, sizeof(owner), repo, sizeof(repo));
+    if (inst.verbose && owner[0])
+    {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Recherche de la dernière release de %s/%s sur GitHub…",
+                 owner, repo);
+        set_msg("%s", msg);
+        vlog("Projet GitHub : %s/%s", owner, repo);
+    }
+    else
+        set_msg("Recherche de la dernière release sur GitHub…", NULL);
 
     char err[192];
     if (github_latest(api_url, prefer_ext, inst.release, sizeof(inst.release),
                       inst.url, sizeof(inst.url), inst.name, sizeof(inst.name),
                       err, sizeof(err)) != 0)
         return fail(inst.cancel ? "Installation annulée" : err);
+
+    char size[24] = "taille inconnue";
+    if (last_asset_size)
+        format_size(size, sizeof(size), last_asset_size);
+    vlog("Release %.30s : %.40s (%s)", inst.release, inst.name, size);
     return 0;
 }
 
@@ -800,8 +901,11 @@ static int extract_zip(sfile_t *sf, const char *out_path)
     if (parts > 1)
         snprintf(inst.msg, sizeof(inst.msg),
                  "Extraction de l'archive (%u morceaux de 1 Go)…", parts);
+    else if (inst.verbose)
+        set_msg("Extraction de la ROM depuis l'archive .zip…", NULL);
     else
         set_msg("Extraction de l'archive…", NULL);
+    vlog("Archive .zip : recherche de la ROM (.nds / .dsi)");
 
     char name[128] = "";
     zip_err_t err = zip_extract_rom(sf, out_path, name, sizeof(name),
@@ -810,6 +914,7 @@ static int extract_zip(sfile_t *sf, const char *out_path)
         return fail(zip_strerror(err));
 
     snprintf(inst.name, sizeof(inst.name), "%s", name);
+    vlog("ROM extraite : %.60s", name);
     return 0;
 }
 
@@ -817,12 +922,58 @@ static int extract_zip(sfile_t *sf, const char *out_path)
 // Tâche d'installation (cothread)
 // ---------------------------------------------------------------------------
 
+// Pré-description : rassemble ce qu'on sait de l'installation (nom, auteur,
+// version, taille...) puis attend que l'utilisateur confirme sur la console
+static int preview_and_wait(bool github, const char *api_url)
+{
+    install_info_t *i = &inst.info;
+    memset(i, 0, sizeof(*i));
+    snprintf(i->name, sizeof(i->name), "%s", inst.name);
+    i->archive = ends_with_ci(inst.name, ".zip");
+    i->github = github;
+
+    if (github)
+    {
+        if (instinfo_repo_of_api_url(api_url, i->author, sizeof(i->author), i->project,
+                                     sizeof(i->project)))
+            snprintf(i->source, sizeof(i->source), "github.com/%s/%s", i->author, i->project);
+        snprintf(i->version, sizeof(i->version), "%s", inst.release);
+        i->size = last_asset_size;
+    }
+    else
+    {
+        // Lien direct : le site nous donne la taille (requête HEAD), s'il veut bien
+        instinfo_url_host(inst.url, i->source, sizeof(i->source));
+        set_msg("Lecture des informations du fichier…", NULL);
+        vlog("Lien direct : demande de la taille à %s", i->source);
+        char err[192];
+        if (http_req(inst.url, false, NULL, NULL, err, sizeof(err)) != 0 && inst.cancel)
+            return fail("Installation annulée");
+        i->size = inst.head_size;
+        if (i->size == 0)
+            vlog("Le site n'indique pas la taille du fichier");
+    }
+
+    inst.confirmed = false;
+    inst.state = INST_PREVIEW;
+    set_msg("Vérifie les informations, puis confirme", NULL);
+    vlog("En attente de ta confirmation");
+    while (!inst.confirmed && !inst.cancel)
+        cothread_yield();
+    if (inst.cancel)
+        return fail("Installation annulée");
+    vlog("Confirmé");
+    return 0;
+}
+
 static int do_install(void)
 {
     inst.release[0] = '\0';
     inst.name[0] = '\0';
     inst.dest[0] = '\0';
     inst.up_to_date = false;
+    last_asset_size = 0;
+    memset(&inst.info, 0, sizeof(inst.info));
 
     mkdir_p(inst.dir);
     snprintf(inst.tmp, sizeof(inst.tmp), "%s/.dsishop_download", inst.dir);
@@ -898,9 +1049,20 @@ static int do_install(void)
             snprintf(inst.name, sizeof(inst.name), "jeu.nds");
     }
 
+    // 1b. Pré-description (installation lancée depuis la console seulement : une
+    //     demande du Remote ou une mise à jour n'a personne pour confirmer)
+    if (!inst.updating && !inst.remote && preview_and_wait(github, api_url) != 0)
+        return -1;
+
     // 2. Téléchargement
     inst.state = INST_DOWNLOADING;
     set_msg("Téléchargement de %s…", inst.name);
+    {
+        char host[48];
+        instinfo_url_host(inst.url, host, sizeof(host));
+        vlog("Téléchargement depuis %s", host);
+    }
+    time_t download_start = time(NULL);
 
     // Le fichier est écrit en morceaux de 1 Go (.000, .001...) : un
     // téléchargement de plus de 4 Go passe donc sur une SD en FAT32.
@@ -913,6 +1075,14 @@ static int do_install(void)
         return -1;
     if (!write_ok)
         return fail("Erreur d'écriture sur la carte SD (pleine ?)");
+
+    {
+        char size[24], speed[24];
+        long secs = (long)(time(NULL) - download_start);
+        format_size(size, sizeof(size), inst.now);
+        instinfo_format_speed(speed, sizeof(speed), secs > 0 ? inst.now / (uint64_t)secs : 0);
+        vlog("Téléchargement terminé : %s en %ld s%s%s", size, secs, speed[0] ? ", " : "", speed);
+    }
 
     if (!sfile_open_read(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT))
         return fail("Fichier téléchargé introuvable sur la carte SD");
@@ -943,9 +1113,11 @@ static int do_install(void)
 
     // 4. Vérification de la ROM
     inst.state = INST_VERIFYING;
-    set_msg("Vérification de la ROM…", NULL);
+    set_msg(inst.verbose ? "Vérification de l'en-tête de la ROM (CRC16)…"
+                         : "Vérification de la ROM…", NULL);
     if (!is_nds_rom(rom))
         return fail("Le fichier n'est pas une ROM DS/DSi valide");
+    vlog("En-tête de la ROM valide (CRC16 correct)");
 
     if (!ends_with_ci(inst.name, ".nds") && !ends_with_ci(inst.name, ".dsi"))
     {
@@ -1017,6 +1189,8 @@ static int do_install(void)
     games_record(inst.dir, &rec);
     set_update_result(inst.name, UPD_UP_TO_DATE, inst.release);
 
+    vlog("Copié dans %.70s", inst.dest);
+    vlog("Terminé");
     set_msg("%s", inst.updating ? "Mise à jour terminée (sauvegardes conservées)"
                                 : "Installation terminée");
     inst.state = INST_DONE;
@@ -1079,9 +1253,40 @@ bool installer_init(void)
     snprintf(inst.root, sizeof(inst.root), "%s", isDSiMode() ? "sd:" : "fat:");
     snprintf(inst.dir, sizeof(inst.dir), "%s/roms/nds", inst.root);
 
+    // Verbose : oui tant qu'on ne l'a pas coupé (réglage mémorisé sur la SD)
+    char v[8];
+    inst.verbose = !(installer_pref_get("verbose", v, sizeof(v)) && v[0] == '0');
+
     inst.curl_ok = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
     inst.state = INST_IDLE;
     return inst.storage_ok;
+}
+
+const install_info_t *installer_preview_info(void)
+{
+    return &inst.info;
+}
+
+void installer_confirm(void)
+{
+    if (inst.state == INST_PREVIEW)
+        inst.confirmed = true;
+}
+
+bool installer_verbose(void)
+{
+    return inst.verbose;
+}
+
+void installer_set_verbose(bool on)
+{
+    inst.verbose = on;
+    installer_pref_set("verbose", on ? "1" : "0");
+}
+
+uint64_t installer_speed(void)
+{
+    return inst.speed;
 }
 
 bool installer_storage_ok(void)
@@ -1211,6 +1416,10 @@ static bool installer_start_link(const char *link, bool remote)
     inst.cancel = false;
     inst.remote = remote;
     inst.now = inst.total = 0;
+    inst.confirmed = false;
+    inst.start_time = time(NULL);
+    log_total = 0;
+    vlog("%s : %.60s", inst.updating ? "Mise à jour" : "Installation", inst.link);
     inst.state = INST_RESOLVING;
     set_msg("Préparation…", NULL);
     return start_thread();

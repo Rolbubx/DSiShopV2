@@ -8,6 +8,7 @@
 #include "games.h"
 #include "gfx.h"
 #include "installer.h"
+#include "instinfo.h"
 #include "keyboard.h"
 #include "lremote.h"
 #include "lremote_glue.h"
@@ -38,6 +39,7 @@ typedef enum {
     SCREEN_BROWSE_USER,   // Clavier : nom d'utilisateur GitHub à parcourir
     SCREEN_BROWSE,        // Liste des projets de cet utilisateur
     SCREEN_TWL,           // Mise à jour de TWiLight Menu++
+    SCREEN_SETTINGS,      // Réglages : thème, Verbose, démarrage
 } app_screen_t;
 
 // Actions qui demandent une confirmation
@@ -119,7 +121,7 @@ static int reboot_seconds_left(void);
 
 static void go(app_screen_t screen)
 {
-    if (screen == SCREEN_MORE && app.screen != SCREEN_MORE)
+    if (screen == SCREEN_SETTINGS && app.screen != SCREEN_SETTINGS)
         app.autoboot = installer_autoboot_get();   // Relu sur la carte SD
     app.screen = screen;
     app.force_redraw = true;
@@ -528,6 +530,17 @@ static void draw_net_card(canvas_t *c, rect_t r)
     }
 }
 
+// Une ligne "Libellé  valeur" de la pré-description (renvoie sa hauteur)
+#define FIELD_LABEL_W 64
+static int draw_field(canvas_t *c, int x, int y, int w, const char *label,
+                      const char *value, uint16_t value_col)
+{
+    gfx_text(c, &font_small, x, y, label, COL_TEXT_OFF);
+    gfx_text_box(c, &font_small, x + FIELD_LABEL_W, y, w - FIELD_LABEL_W, ALIGN_LEFT,
+                 value, value_col);
+    return font_small.height + 1;
+}
+
 static void draw_top(canvas_t *c)
 {
     gfx_gradient_v(c, 0, 0, SCREEN_W, SCREEN_H, COL_BG2, COL_BG);
@@ -537,6 +550,7 @@ static void draw_top(canvas_t *c)
     {
         case SCREEN_HOME:
         case SCREEN_MORE:
+        case SCREEN_SETTINGS:
         {
             // Titre "hero"
             gfx_text_box(c, &font_title, 0, 30, SCREEN_W, ALIGN_CENTER,
@@ -800,6 +814,51 @@ static void draw_top(canvas_t *c)
                 break;
             }
 
+            if (st == INST_PREVIEW)
+            {
+                // Pré-description : ce qui va être installé
+                const install_info_t *i = installer_preview_info();
+                int x = r.x + 8, w = r.w - 16, y = r.y + 6;
+                char size[24], free_s[24], line[160];
+
+                gfx_text_box(c, &font_body, x, y, w, ALIGN_LEFT, i->name, COL_TEXT);
+                y += font_body.height + 3;
+                if (i->project[0])
+                    y += draw_field(c, x, y, w, "Projet", i->project, COL_TEXT);
+                if (i->author[0])
+                    y += draw_field(c, x, y, w, "Auteur", i->author, COL_TEXT);
+                else if (!i->github && i->source[0])
+                    y += draw_field(c, x, y, w, "Site", i->source, COL_TEXT);
+                if (i->version[0])
+                    y += draw_field(c, x, y, w, "Version", i->version, COL_TEXT);
+
+                uint64_t free_b = installer_free_space();
+                format_size(free_s, sizeof(free_s), free_b);
+                uint16_t size_col = COL_TEXT;
+                if (i->size == 0)
+                    snprintf(line, sizeof(line), "inconnue");
+                else
+                {
+                    format_size(size, sizeof(size), i->size);
+                    if (free_b && i->size > free_b)
+                    {
+                        snprintf(line, sizeof(line), "%s : pas assez de place (%s libre)", size,
+                                 free_s);
+                        size_col = COL_ERR;
+                    }
+                    else if (installer_verbose() && free_b)
+                        snprintf(line, sizeof(line), "%s (%s libre sur la SD)", size, free_s);
+                    else
+                        snprintf(line, sizeof(line), "%s", size);
+                }
+                y += draw_field(c, x, y, w, "Taille", line, size_col);
+                if (installer_verbose() && i->archive)
+                    y += draw_field(c, x, y, w, "Format", "archive .zip (la ROM sera extraite)",
+                                    COL_TEXT_DIM);
+                y += draw_field(c, x, y, w, "Dossier", installer_dir(), COL_TEXT_DIM);
+                break;
+            }
+
             // Liste des étapes
             static const struct {
                 inst_state_t state;
@@ -840,25 +899,42 @@ static void draw_top(canvas_t *c)
             y += 4;
 
             char line[192];
-            if (installer_file_name()[0])
+            const uint64_t GB = 1024ull * 1024 * 1024;
+            uint64_t total = installer_progress_total();
+            bool big = st == INST_DOWNLOADING && total > GB;
+
+            if (installer_verbose() && installer_log_count() > 0)
             {
-                snprintf(line, sizeof(line), "Fichier : %s", installer_file_name());
-                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
-                             COL_TEXT_DIM);
-                y += font_small.height + 2;
+                // Mode détaillé : le journal des dernières étapes, avec leur durée
+                int room = (r.y + r.h - 4 - y) / font_small.height - (big ? 1 : 0);
+                int n = installer_log_count();
+                for (int k = n > room ? n - room : 0; k < n; k++)
+                {
+                    gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT,
+                                 installer_log_get(k), k == n - 1 ? COL_TEXT : COL_TEXT_DIM);
+                    y += font_small.height;
+                }
             }
-            if (installer_release()[0])
+            else
             {
-                snprintf(line, sizeof(line), "Release : %s", installer_release());
-                gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
-                             COL_TEXT_DIM);
-                y += font_small.height + 2;
+                if (installer_file_name()[0])
+                {
+                    snprintf(line, sizeof(line), "Fichier : %s", installer_file_name());
+                    gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                                 COL_TEXT_DIM);
+                    y += font_small.height + 2;
+                }
+                if (installer_release()[0])
+                {
+                    snprintf(line, sizeof(line), "Release : %s", installer_release());
+                    gfx_text_box(c, &font_small, r.x + 8, y, r.w - 16, ALIGN_LEFT, line,
+                                 COL_TEXT_DIM);
+                    y += font_small.height + 2;
+                }
             }
 
             // Gros fichiers : stockés en morceaux de 1 Go (limite FAT32 : 4 Go)
-            const uint64_t GB = 1024ull * 1024 * 1024;
-            uint64_t total = installer_progress_total();
-            if (st == INST_DOWNLOADING && total > GB)
+            if (big)
             {
                 snprintf(line, sizeof(line), "Découpé en %u morceaux de 1 Go sur la SD",
                          (unsigned)((total + GB - 1) / GB));
@@ -982,6 +1058,8 @@ static uint32_t top_signature(void)
     MIX((uintptr_t)http_progress_text()[0]);
     MIX(net_signal_bars());
     MIX(installer_state());
+    MIX(installer_log_count());
+    MIX(installer_verbose());
     MIX(installer_progress_now() / 8192);
     MIX(installer_progress_total());
     MIX(strlen(installer_message()));
@@ -1101,8 +1179,8 @@ static void screen_more(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Plus", NULL);
 
-    const int bh = 20, step = 23;
-    int y = 27;
+    const int bh = 24, step = 27;
+    int y = 28;
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Mettre à jour TWiLight Menu++",
                   BTN_STYLE_NORMAL, true))
     {
@@ -1112,6 +1190,54 @@ static void screen_more(canvas_t *c, const input_t *in)
             installer_twl_check();
     }
     y += step;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Réglages", BTN_STYLE_NORMAL, true))
+        go(SCREEN_SETTINGS);
+    y += step;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Test Internet (HTTP)",
+                  BTN_STYLE_NORMAL, net_state() == NET_CONNECTED))
+        go(SCREEN_HTTP);
+    y += step;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "À propos", BTN_STYLE_NORMAL, true))
+        go(SCREEN_ABOUT);
+    y += step;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Quitter DSi Shop",
+                  BTN_STYLE_DANGER, true))
+        app.quit = true;
+    y += step;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Retour", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+        go(SCREEN_HOME);
+}
+
+// Réglages : thème, Verbose, lancement au démarrage
+static void screen_settings(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Réglages", NULL);
+
+    const int bh = 26, step = 32;
+    int y = 30;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh),
+                  ui_theme_is_light() ? "Thème : clair" : "Thème : sombre",
+                  BTN_STYLE_NORMAL, true))
+    {
+        bool light = !ui_theme_is_light();
+        ui_set_theme(light);
+        installer_pref_set("theme", light ? "light" : "dark");
+        app.force_redraw = true;   // Redessine aussi l'écran du haut
+    }
+    y += step;
+
+    // Verbose : étapes détaillées pendant une installation (oui par défaut)
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh),
+                  installer_verbose() ? "Verbose : OUI" : "Verbose : NON",
+                  BTN_STYLE_NORMAL, true))
+    {
+        installer_set_verbose(!installer_verbose());
+        ui_toast(installer_verbose() ? "Étapes détaillées pendant l'installation"
+                                     : "Étapes résumées pendant l'installation");
+    }
+    y += step;
+
     // TWiLight Menu++ relance tout seul la dernière ROM (ici : DSi Shop)
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh),
                   app.autoboot ? "Au démarrage : DSi Shop" : "Au démarrage : TWiLight Menu++",
@@ -1127,30 +1253,13 @@ static void screen_more(canvas_t *c, const input_t *in)
         }
     }
     y += step;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Test Internet (HTTP)",
-                  BTN_STYLE_NORMAL, net_state() == NET_CONNECTED))
-        go(SCREEN_HTTP);
-    y += step;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh),
-                  ui_theme_is_light() ? "Thème : clair" : "Thème : sombre",
-                  BTN_STYLE_NORMAL, true))
-    {
-        bool light = !ui_theme_is_light();
-        ui_set_theme(light);
-        installer_pref_set("theme", light ? "light" : "dark");
-        app.force_redraw = true;   // Redessine aussi l'écran du haut
-    }
-    y += step;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "À propos", BTN_STYLE_NORMAL, true))
-        go(SCREEN_ABOUT);
-    y += step;
-    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Quitter DSi Shop",
-                  BTN_STYLE_DANGER, true))
-        app.quit = true;
-    y += step;
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Retour", BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
-        go(SCREEN_HOME);
+        go(SCREEN_MORE);
+
+    gfx_text_wrap(c, &font_small, 12, SCREEN_H - 30, SCREEN_W - 24, 28,
+                  "Verbose : détaille les étapes d'une installation (journal, débit).",
+                  COL_TEXT_OFF);
 }
 
 // Remote en ligne (serveur + compte Google)
@@ -1800,6 +1909,28 @@ static void screen_install(canvas_t *c, const input_t *in)
     bool busy = install_busy();
     bool online = net_state() == NET_CONNECTED;
 
+    if (installer_state() == INST_PREVIEW)
+    {
+        // Pré-description affichée en haut : on attend la confirmation
+        const install_info_t *info = installer_preview_info();
+        uint64_t free_b = installer_free_space();
+        bool fits = !(info->size && free_b && info->size > free_b);
+
+        gfx_text_wrap(c, &font_small, 10, 52, SCREEN_W - 20, 40,
+                      fits ? "Vérifie les informations de l'écran du haut, puis confirme."
+                           : "Il n'y a pas assez de place sur la carte SD pour ce fichier.",
+                      fits ? COL_TEXT_DIM : COL_ERR);
+        if (ui_button(c, RECT(BTN_X0, 98, BTN_W, BTN_H), "Installer", BTN_STYLE_PRIMARY,
+                      fits) ||
+            (fits && (in->down & BTN_START)))
+            installer_confirm();
+        if (ui_button(c, RECT(BTN_X0, 134, BTN_W, BTN_H), "Annuler", BTN_STYLE_NORMAL,
+                      true) ||
+            (in->down & BTN_B))
+            installer_cancel();
+        return;
+    }
+
     gfx_text_box(c, &font_small, 10, 50, SCREEN_W - 20, ALIGN_LEFT,
                  "Lien GitHub ou URL d'un .nds / .dsi / .zip", COL_TEXT_DIM);
 
@@ -1835,7 +1966,26 @@ static void screen_install(canvas_t *c, const input_t *in)
                      installer_message(), COL_TEXT);
         gfx_text(c, &font_small, SCREEN_W - 16 - lw, 114, line, COL_TEXT_DIM);
 
-        if (ui_button(c, RECT(BTN_X0, 140, BTN_W, BTN_H), "Annuler",
+        // Mode détaillé : débit et durée restante du téléchargement
+        bool verbose = installer_verbose();
+        if (verbose && installer_state() == INST_DOWNLOADING)
+        {
+            char speed[24], eta[32], detail[80];
+            uint64_t now_b = installer_progress_now(), total_b = installer_progress_total();
+            instinfo_format_speed(speed, sizeof(speed), installer_speed());
+            instinfo_format_eta(eta, sizeof(eta), total_b > now_b ? total_b - now_b : 0,
+                                installer_speed());
+            if (speed[0] && total_b > 0)
+                snprintf(detail, sizeof(detail), "%s · reste %s", speed, eta);
+            else if (speed[0])
+                snprintf(detail, sizeof(detail), "%s", speed);
+            else
+                snprintf(detail, sizeof(detail), "Mesure du débit…");
+            gfx_text_box(c, &font_small, 16, 128, SCREEN_W - 32, ALIGN_LEFT, detail,
+                         COL_TEXT_DIM);
+        }
+
+        if (ui_button(c, RECT(BTN_X0, verbose ? 148 : 140, BTN_W, BTN_H), "Annuler",
                       BTN_STYLE_DANGER, true) ||
             (in->down & BTN_B))
             installer_cancel();
@@ -2590,6 +2740,7 @@ void app_frame(const input_t *in)
             case SCREEN_BROWSE_USER: screen_browse_user(c, in); break;
             case SCREEN_BROWSE:   screen_browse(c, in); break;
             case SCREEN_TWL:      screen_twl(c, in); break;
+            case SCREEN_SETTINGS: screen_settings(c, in); break;
         }
 
         ui_draw_toast(c);

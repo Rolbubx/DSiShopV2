@@ -18,3 +18,4 @@ tools/test/test_sysupdate
 tools/test/test_twlini
 udb.json
 catalog-server/*.prev
+tools/test/test_instinfo

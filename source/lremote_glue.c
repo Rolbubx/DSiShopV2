@@ -102,6 +102,7 @@ static const char *state_name(inst_state_t s)
     switch (s)
     {
         case INST_RESOLVING:   return "resolving";
+        case INST_PREVIEW:     return "resolving";   // attend la confirmation sur la console
         case INST_DOWNLOADING: return "downloading";
         case INST_EXTRACTING:  return "extracting";
         case INST_VERIFYING:   return "verifying";

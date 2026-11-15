@@ -1,6 +1,6 @@
 # Simulateur PC de l'interface (sans matériel DS). Nécessite gcc.
 SRC := sim_main.c net_sim.c installer_sim.c remote_sim.c \
-       ../../source/games.c ../../source/thirdparty/qrcodegen.c \
+       ../../source/games.c ../../source/instinfo.c ../../source/thirdparty/qrcodegen.c \
        ../../source/lremote.c ../../source/lremote_net.c ../../source/lremote_page.c \
        ../../source/lremote_glue.c ../../source/sha256.c \
        ../../source/app.c ../../source/gfx.c ../../source/ui.c \

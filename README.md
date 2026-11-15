@@ -58,6 +58,7 @@ source/
   zip.c/.h      extraction ZIP / ZIP64 (portable, testé sur PC)
   sysupdate.c/.h  mise à jour de TWiLight Menu++ par paquets (portable, testé sur PC)
   twlini.c/.h   réglages de TWiLight Menu++ : lancement de DSi Shop au démarrage (portable)
+  instinfo.c/.h pré-description d'une installation : taille, auteur, débit (portable)
   cacert.s      embarque data/cacert.pem (certificats racines)
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
@@ -255,6 +256,27 @@ Le premier appel à `/twilight/manifest` lance la préparation en arrière-plan 
 cherchée toutes les 30 minutes. Tests : `python3 catalog-server/test_twilight.py`, et
 `make -C tools/test check` qui applique de vrais paquets du serveur avec le code de la
 console sur une fausse carte SD (coupure, reprise, paquet corrompu).
+
+## Pré-description et mode Verbose
+
+Avant de télécharger, une installation lancée depuis la console s'arrête sur une
+**pré-description** : l'écran du haut montre le nom du fichier, le projet, l'**auteur**, la
+**version** (tag de la release GitHub), la **taille**, le dossier de destination et la place
+libre sur la carte SD. Il faut confirmer avec « Installer » (ou START), ou annuler avec B ;
+s'il n'y a pas assez de place, la confirmation est bloquée. Pour un lien direct, l'auteur et
+la version ne sont pas connus : on affiche le site, et la taille si le serveur l'indique
+(requête HEAD). Les installations demandées depuis le Remote et les mises à jour de jeux n'ont
+personne pour confirmer : elles n'ont pas de pré-description.
+
+**Plus → Réglages → Verbose** (OUI par défaut, mémorisé dans `_dsishop/verbose` sur la SD) :
+- les messages d'étape sont plus précis (projet recherché, vérification du CRC16…) ;
+- l'écran du haut montre un journal des dernières étapes avec leur durée (`[12s] …`),
+  y compris un point tous les 25 % du téléchargement ;
+- l'écran du bas ajoute le débit et la durée restante du téléchargement ;
+- la pré-description ajoute le format (archive .zip) et la place libre.
+
+Avec NON, on retrouve l'affichage résumé d'avant. Le thème et le lancement au démarrage sont
+dans le même écran Réglages.
 
 ## Mettre à jour DSi Shop
 
