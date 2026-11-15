@@ -35,6 +35,27 @@ static void read_input(input_t *in)
     }
 }
 
+// Diagnostic de démarrage (make DIAG=1) : chaque étape reste affichée assez
+// longtemps pour être vue. Attente active : ne dépend pas des interruptions.
+#ifdef BOOT_DIAG
+static void diag_wait(int tenths)
+{
+    // swiDelay : 4 cycles par tour, à 33 MHz (x4 quand l'ARM9 est à 134 MHz)
+    uint32_t loops = 838000 * (REG_SCFG_CLK & 1 && isDSiMode() ? 4 : 1);
+    for (int i = 0; i < tenths; i++)
+        swiDelay(loops);
+}
+static void diag_color(int r, int g, int b)
+{
+    BG_PALETTE[0] = RGB15(r, g, b);
+    BG_PALETTE_SUB[0] = RGB15(r, g, b);
+    diag_wait(20);
+}
+#else
+#define diag_wait(tenths) ((void)0)
+#define diag_color(r, g, b) ((void)0)
+#endif
+
 // Écran de démarrage : affiché tout de suite, avec l'étape en cours. Si la
 // console reste bloquée pendant l'init (carte SD, Wi-Fi...), on voit où.
 static void boot_step(int step, int total, const char *msg)
@@ -59,8 +80,11 @@ static void boot_step(int step, int total, const char *msg)
                  "Bloqué sur le Wi-Fi ? Relance en maintenant B", COL_TEXT_OFF);
 
     // Affiche immédiatement (on n'est pas encore dans la boucle principale)
+#ifndef BOOT_DIAG
     swiWaitForVBlank();
+#endif
     gfx_present();
+    diag_wait(15);
 }
 
 int main(int argc, char **argv)
@@ -75,6 +99,7 @@ int main(int argc, char **argv)
     REG_DISPCNT_SUB = MODE_0_2D;
     BG_PALETTE[0] = RGB15(31, 0, 0);      // ROUGE : main() atteint
     BG_PALETTE_SUB[0] = RGB15(31, 0, 0);
+    diag_color(31, 0, 0);
 
     // Plantage : affiche les registres au lieu d'un écran figé
     defaultExceptionHandler();
@@ -85,6 +110,7 @@ int main(int argc, char **argv)
 
     BG_PALETTE[0] = RGB15(31, 31, 0);     // JAUNE : setCpuClock OK
     BG_PALETTE_SUB[0] = RGB15(31, 31, 0);
+    diag_color(31, 31, 0);
 
     gfx_init();
 

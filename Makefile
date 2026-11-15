@@ -49,6 +49,12 @@ NITROFSDIR	:=
 REMOTE_SERVER	?=
 DEFINES		:= -DREMOTE_SERVER=\"$(REMOTE_SERVER)\"
 
+# Diagnostic de démarrage : "make DIAG=1" garde chaque étape à l'écran (rouge,
+# jaune, puis les étapes 1/4 à 4/4) pour voir où la console s'arrête.
+ifeq ($(DIAG),1)
+    DEFINES	+= -DBOOT_DIAG
+endif
+
 # Libraries
 # ---------
 
