@@ -59,6 +59,7 @@ source/
   sysupdate.c/.h  mise à jour de TWiLight Menu++ par paquets (portable, testé sur PC)
   twlini.c/.h   réglages de TWiLight Menu++ : lancement de DSi Shop au démarrage (portable)
   instinfo.c/.h pré-description d'une installation : taille, auteur, débit (portable)
+  sdscan.c/.h   recherche de tous les jeux de la carte SD, par étapes (portable)
   cacert.s      embarque data/cacert.pem (certificats racines)
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
@@ -256,6 +257,26 @@ Le premier appel à `/twilight/manifest` lance la préparation en arrière-plan 
 cherchée toutes les 30 minutes. Tests : `python3 catalog-server/test_twilight.py`, et
 `make -C tools/test check` qui applique de vrais paquets du serveur avec le code de la
 console sur une fausse carte SD (coupure, reprise, paquet corrompu).
+
+## Menu principal et « Gérer les jeux »
+
+DSi Shop vise à être un lanceur « universel » : le menu principal a deux grandes tuiles
+(**Installer un jeu** et **Gérer les jeux**), deux raccourcis (Wi-Fi, Plus…) et, tout en bas,
+une case **Remote** (commande depuis un téléphone) avec une pastille verte quand il est actif.
+
+**Gérer les jeux** ouvre l'onglet **Toute la SD** : il parcourt tous les dossiers de la carte
+(jusqu'à 7 niveaux) et liste tous les jeux `.nds` / `.dsi` trouvés, quel que soit leur dossier,
+avec leur taille, leur dossier, et un badge « DSi Shop » pour ceux du dossier d'installation.
+L'analyse se fait par petites étapes à chaque image : l'écran reste fluide, et on peut la
+relancer avec « Rescanner » (elle se refait aussi toute seule après une installation ou une
+suppression). Les dossiers du système (`_nds`, `title`, `private`, `DCIM`, `luma`, `3ds`…) et
+les dossiers cachés sont ignorés ; la liste est limitée aux 256 premiers jeux. En haut,
+un résumé : nombre de jeux, dossiers parcourus, place prise.
+
+Toucher un jeu ouvre sa fiche : sauvegardes, version précédente, suppression. Pour un jeu
+rangé hors du dossier de DSi Shop, il n'y a pas de mise à jour automatique (on ne sait pas d'où
+il vient) et « Désinstaller » devient « Supprimer le jeu » ; aucun fichier de registre n'est
+créé dans ses dossiers. L'onglet « Mes jeux » reste la liste des jeux installés par DSi Shop.
 
 ## Pré-description et mode Verbose
 

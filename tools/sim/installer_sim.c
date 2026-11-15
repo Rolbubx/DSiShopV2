@@ -39,6 +39,9 @@ static char twl_have[64] = "v27.24.0";
 bool installer_init(void) { return true; }
 bool installer_storage_ok(void) { return true; }
 const char *installer_dir(void) { return sim_games_dir; }
+// Racine de la "carte" du simulateur (dossier de sortie, défini par sim_main.c)
+char sim_root[512] = "/tmp";
+const char *installer_root(void) { return sim_root; }
 void installer_setup_tls(void *curl) { (void)curl; }
 uint64_t installer_free_space(void) { return 16ull << 30; }
 bool installer_was_remote(void) { return remote; }

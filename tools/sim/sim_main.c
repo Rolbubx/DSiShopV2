@@ -86,6 +86,7 @@ static void press(uint32_t key)
 }
 
 extern char sim_games_dir[512];
+extern char sim_root[512];
 void remote_sim_pair(const char *name, const char *mail);
 
 static void fake_rom(const char *name, size_t size)
@@ -95,6 +96,26 @@ static void fake_rom(const char *name, size_t size)
     FILE *f = fopen(path, "wb");
     for (size_t i = 0; f && i < size; i++)
         fputc(0, f);
+    if (f)
+        fclose(f);
+}
+
+// Faux jeu n'importe où sur la "carte" (dossiers créés au besoin)
+static void fake_game_at(const char *rel, size_t size)
+{
+    char path[700], dir[700];
+    snprintf(path, sizeof(path), "%s/%s", sim_root, rel);
+    snprintf(dir, sizeof(dir), "%s", path);
+    for (char *p = dir + strlen(sim_root) + 1; *p; p++)
+        if (*p == '/')
+        {
+            *p = '\0';
+            mkdir(dir, 0777);
+            *p = '/';
+        }
+    FILE *f = fopen(path, "wb");
+    for (size_t i = 0; f && i < size; i += 16)
+        fwrite("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 1, size - i < 16 ? size - i : 16, f);
     if (f)
         fclose(f);
 }
@@ -116,6 +137,7 @@ int main(int argc, char **argv)
 
     // Dossier de jeux factice (vrais fichiers : la liste, les mises à jour et
     // les sauvegardes passent par games.c, comme sur la console)
+    snprintf(sim_root, sizeof(sim_root), "%s", dir);
     snprintf(sim_games_dir, sizeof(sim_games_dir), "%s/roms", dir);
     mkdir(sim_games_dir, 0777);
     char saves[600];
@@ -126,6 +148,11 @@ int main(int argc, char **argv)
     fake_rom("saves/Pong.sav", 512);
     fake_rom("Tetris DS Remix.dsi", 4718592);
     fake_rom("Zelda Homebrew.nds", 9437184);
+    // Jeux rangés ailleurs sur la carte (dossiers libres), et un dossier système à ignorer
+    fake_game_at("homebrew/Doom DS.nds", 3145728);
+    fake_game_at("jeux/Plateforme/Mario Clone.nds", 6291456);
+    fake_game_at("jeux/Puzzle/Tetris Plus.dsi", 1048576);
+    fake_game_at("_nds/TWiLightMenu/menu.nds", 4096);
     record("Pong.nds", "github.com/auteur/pong", "v1.0.3",
            "https://github.com/auteur/pong/releases/download/v1.0.3/pong.nds");
     record("Zelda Homebrew.nds", "https://exemple.fr/zelda.zip", "",
@@ -138,8 +165,20 @@ int main(int argc, char **argv)
     frames(2);
     save(dir, "01_menu");
 
+    // Gérer les jeux : tous les jeux de la carte SD, puis la fiche d'un jeu rangé ailleurs
+    tap(190, 70);
+    frames(40);
+    save(dir, "01b_gerer_les_jeux");
+    tap(128, 68);
+    frames(3);
+    save(dir, "01c_fiche_jeu_sd");
+    press(BTN_B);              // Fiche -> liste
+    frames(3);
+    press(BTN_B);              // Liste -> accueil
+    frames(3);
+
     // Wi-Fi -> réseaux enregistrés
-    tap(128, 147);
+    tap(60, 126);              // Wi-Fi
     frames(2);
     tap(128, 47);
     frames(120);
@@ -147,7 +186,7 @@ int main(int argc, char **argv)
     frames(2);
 
     // Remote -> onglet Local : formulaire identifiant / mot de passe
-    tap(190, 78);
+    tap(128, 172);             // Case Remote
     frames(2);
     save(dir, "02_remote_local_config");
 
@@ -185,7 +224,7 @@ int main(int argc, char **argv)
     // Plus -> Réglages (thème, Verbose, démarrage)
     press(BTN_B);
     frames(2);
-    tap(214, 147);             // Raccourci "Plus"
+    tap(178, 126);             // Raccourci "Plus"
     frames(2);
     save(dir, "08_plus");
     tap(128, 67);              // Réglages
@@ -246,7 +285,7 @@ int main(int argc, char **argv)
     // Installation AVEC Verbose (réglage par défaut) : confirmation puis journal
     press(BTN_B);              // -> accueil
     frames(2);
-    tap(214, 147);             // Plus
+    tap(178, 126);             // Plus
     frames(2);
     tap(128, 67);              // Réglages
     frames(2);

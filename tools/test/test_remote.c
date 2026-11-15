@@ -157,6 +157,16 @@ static void test_games(const char *base)
     n = games_scan(dir, g, GAMES_MAX);
     CHECK(n == 3 && g[1].source[0] == '\0', "registre nettoyé");
 
+    // Un jeu rangé dans un dossier sans registre DSi Shop (Gérer les jeux > Toute la SD) :
+    // on peut le supprimer sans créer de .dsishop.tsv chez l'utilisateur
+    char other[600];
+    snprintf(other, sizeof(other), "%s/ailleurs", base);
+    mkdir(other, 0777);
+    touch(other, "Doom.nds", 64);
+    CHECK(games_uninstall(other, "Doom.nds"), "suppression hors du dossier de DSi Shop");
+    CHECK(!exists(other, "Doom.nds"), "Doom supprimé");
+    CHECK(!exists(other, ".dsishop.tsv"), "registre créé dans un dossier qui n'en avait pas");
+
     char path[700];
     snprintf(path, sizeof(path), "%s/notes.txt", dir);
     struct stat st;

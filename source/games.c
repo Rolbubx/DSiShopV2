@@ -175,6 +175,11 @@ static bool rewrite_manifest(const char *dir, const char *file, const game_t *g)
     snprintf(path, sizeof(path), "%s/%s", dir, MANIFEST);
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 
+    // Retirer une entrée d'un dossier sans registre (jeu rangé ailleurs sur la
+    // carte) : rien à faire, et surtout pas de fichier à créer chez l'utilisateur
+    if (!g && !file_exists(path))
+        return true;
+
     FILE *out = fopen(tmp, "w");
     if (!out)
         return false;

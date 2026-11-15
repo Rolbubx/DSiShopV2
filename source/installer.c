@@ -1299,6 +1299,11 @@ const char *installer_dir(void)
     return inst.dir;
 }
 
+const char *installer_root(void)
+{
+    return inst.root;
+}
+
 // Petits réglages enregistrés dans <carte SD>/_dsishop/<nom>
 bool installer_pref_get(const char *name, char *out, size_t size)
 {

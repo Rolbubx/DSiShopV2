@@ -13,6 +13,7 @@
 #include "lremote.h"
 #include "lremote_glue.h"
 #include "net.h"
+#include "sdscan.h"
 #include "remote.h"
 #include "thirdparty/qrcodegen.h"
 #include "ui.h"
@@ -55,8 +56,8 @@ enum { RTAB_LOCAL, RTAB_ONLINE };
 // Modes de l'écran "Parcourir GitHub"
 enum { BMODE_SEARCH, BMODE_USER };
 
-// Onglets de l'écran "Installer un jeu"
-enum { TAB_INSTALL, TAB_GAMES };
+// Onglets de l'écran "Installer un jeu" / "Gérer les jeux"
+enum { TAB_INSTALL, TAB_GAMES, TAB_SD };
 
 // Taille max d'un QR code (version 10 : URL jusqu'à ~170 caractères)
 #define QR_MAX_VERSION 10
@@ -95,6 +96,13 @@ static struct {
     int ngames;
     bool games_loaded;
     int games_scroll;
+    // Gérer les jeux : tous les jeux (.nds / .dsi) de la carte SD, analysés par étapes
+    sdscan_t sdscan;
+    bool sd_started;      // Une analyse a été lancée
+    bool sd_dirty;        // La carte a changé : à ré-analyser en revenant sur l'onglet
+    int sd_scroll;
+    char sel_dir[SDSCAN_PATH];  // Dossier du jeu affiché dans la fiche
+    bool sel_from_sd;           // La fiche vient de l'onglet "Toute la SD"
     game_t sel;           // Jeu affiché dans la fiche
     int sel_saves;        // Nombre de fichiers de sauvegarde trouvés
     bool sel_backup;      // Une version précédente est disponible
@@ -285,6 +293,33 @@ static void refresh_games(void)
         app.games_scroll = 0;
 }
 
+// Analyse de la carte SD (onglet "Toute la SD") : lancée ici, avancée par petites
+// étapes à chaque image (voir sd_scan_tick)
+static void sd_start_scan(void)
+{
+    if (!installer_storage_ok())
+        return;
+    char root[SDSCAN_PATH];
+    snprintf(root, sizeof(root), "%s/", installer_root());
+    sdscan_start(&app.sdscan, root);
+    app.sd_started = true;
+    app.sd_dirty = false;
+    app.sd_scroll = 0;
+}
+
+// À l'ouverture de l'onglet : première analyse, ou la carte a changé depuis
+static void sd_enter(void)
+{
+    if (!app.sd_started || app.sd_dirty)
+        sd_start_scan();
+}
+
+static void sd_scan_tick(void)
+{
+    if (app.sd_started && !app.sdscan.done)
+        sdscan_step(&app.sdscan, 40);
+}
+
 // Dessine un QR code (fond blanc + zone de silence), centré dans la boîte
 static void draw_qr(canvas_t *c, rect_t box, const char *text)
 {
@@ -329,17 +364,17 @@ static void icon_download(canvas_t *c, int cx, int cy, uint16_t col)
     gfx_fill_rect(c, cx - 13, cy + 11, 27, 3, col);
 }
 
-static void icon_qr(canvas_t *c, int cx, int cy, uint16_t col, uint16_t bg)
+// s : taille d'un module (3 : grande tuile, 2 : case du bas)
+static void icon_qr(canvas_t *c, int cx, int cy, uint16_t col, uint16_t bg, int s)
 {
     // Trois "yeux" de QR code et quelques modules
-    const int s = 3;
-    const int eyes[3][2] = { { -15, -15 }, { 6, -15 }, { -15, 6 } };
+    const int eyes[3][2] = { { -5 * s, -5 * s }, { 2 * s, -5 * s }, { -5 * s, 2 * s } };
     for (int i = 0; i < 3; i++)
     {
         int x = cx + eyes[i][0], y = cy + eyes[i][1];
         gfx_fill_rect(c, x, y, 3 * s, 3 * s, col);
-        gfx_fill_rect(c, x + 2, y + 2, 3 * s - 4, 3 * s - 4, bg);
-        gfx_fill_rect(c, x + 3, y + 3, 3, 3, col);
+        gfx_fill_rect(c, x + s - 1, y + s - 1, s + 2, s + 2, bg);
+        gfx_fill_rect(c, x + s, y + s, s, s, col);
     }
     static const int8_t dots[][2] = {
         { 1, 1 }, { 2, 3 }, { 4, 2 }, { 1, 5 }, { 3, 6 }, { 5, 4 }, { 6, 6 },
@@ -349,7 +384,18 @@ static void icon_qr(canvas_t *c, int cx, int cy, uint16_t col, uint16_t bg)
         gfx_fill_rect(c, cx + dots[i][0] * s - 1, cy + dots[i][1] * s - 1, s, s, col);
 }
 
-typedef enum { ICON_DOWNLOAD, ICON_QR } icon_t;
+// Une cartouche de jeu
+static void icon_games(canvas_t *c, int cx, int cy, uint16_t col, uint16_t bg)
+{
+    gfx_fill_round_rect(c, cx - 11, cy - 14, 23, 28, 3, col);   // Cartouche
+    gfx_fill_rect(c, cx - 7, cy - 10, 15, 11, bg);              // Étiquette
+    gfx_fill_rect(c, cx - 4, cy - 7, 9, 2, col);
+    gfx_fill_rect(c, cx - 4, cy - 3, 6, 2, col);
+    for (int i = 0; i < 4; i++)                                  // Contacts
+        gfx_fill_rect(c, cx - 7 + i * 4, cy + 5, 2, 7, bg);
+}
+
+typedef enum { ICON_DOWNLOAD, ICON_QR, ICON_GAMES } icon_t;
 
 // Grande tuile du menu principal
 static bool ui_tile(canvas_t *c, rect_t r, const char *title, const char *sub,
@@ -378,13 +424,42 @@ static bool ui_tile(canvas_t *c, rect_t r, const char *title, const char *sub,
     int cx = r.x + r.w / 2, cy = r.y + 30 + dy;
     if (icon == ICON_DOWNLOAD)
         icon_download(c, cx, cy, fg);
+    else if (icon == ICON_GAMES)
+        icon_games(c, cx, cy, fg, bg);
     else
-        icon_qr(c, cx, cy, fg, bg);
+        icon_qr(c, cx, cy, fg, bg, 3);
 
     gfx_text_box(c, &font_body, r.x + 4, r.y + 54 + dy, r.w - 8, ALIGN_CENTER,
                  title, fg);
     gfx_text_box(c, &font_small, r.x + 4, r.y + 54 + font_body.height + dy, r.w - 8,
                  ALIGN_CENTER, sub, gfx_blend(bg, fg, 11));
+    return clicked;
+}
+
+// Case du Remote, en bas du menu principal : icône, titre, état et pastille
+static bool ui_remote_box(canvas_t *c, rect_t r, const char *title, const char *sub,
+                          bool active)
+{
+    bool pressed, focused;
+    bool clicked = ui_hit(r, true, &pressed, &focused);
+
+    uint16_t bg = pressed ? COL_PANEL_DOWN : COL_PANEL_HI;
+    if (focused)
+    {
+        gfx_round_rect(c, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 12, COL_ACCENT);
+        gfx_round_rect(c, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 11, COL_ACCENT);
+    }
+    gfx_fill_round_rect(c, r.x, r.y, r.w, r.h, 10, bg);
+    gfx_gradient_v(c, r.x + 10, r.y + 1, r.w - 20, 1,
+                   gfx_blend(bg, COLOR_RGB(255, 255, 255), 4), bg);
+
+    int dy = pressed ? 1 : 0;
+    icon_qr(c, r.x + 24, r.y + r.h / 2 + dy, COL_TEXT, bg, 2);
+    gfx_text_box(c, &font_body, r.x + 52, r.y + 3 + dy, r.w - 52 - 24, ALIGN_LEFT, title,
+                 COL_TEXT);
+    gfx_text_box(c, &font_small, r.x + 52, r.y + 3 + font_body.height + dy,
+                 r.w - 52 - 24, ALIGN_LEFT, sub, COL_TEXT_DIM);
+    gfx_fill_circle(c, r.x + r.w - 14, r.y + r.h / 2 + dy, 4, active ? COL_OK : COL_TEXT_OFF);
     return clicked;
 }
 
@@ -780,11 +855,66 @@ static void draw_top(canvas_t *c)
         case SCREEN_BROWSE_USER:
         case SCREEN_BROWSE:
         {
-            gfx_text(c, &font_title, 12, 30, "Installer un jeu", COL_TEXT);
+            inst_state_t st = installer_state();
+            bool manage = app.screen == SCREEN_INSTALL && app.install_tab == TAB_SD;
+            gfx_text(c, &font_title, 12, 30, manage ? "Gérer les jeux" : "Installer un jeu",
+                     COL_TEXT);
             rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
             ui_panel(c, r);
 
-            inst_state_t st = installer_state();
+            if (manage && (st == INST_IDLE || st == INST_DONE))
+            {
+                // Résumé de ce qui a été trouvé sur la carte SD
+                const sdscan_t *s = &app.sdscan;
+                bool scanning = app.sd_started && !s->done;
+                int x = r.x + 8, w = r.w - 16, y = r.y + 6;
+                char line[160], size[24];
+                uint64_t total = 0;
+                int in_shop = 0;
+                for (int i = 0; i < s->count; i++)
+                {
+                    char folder[SDSCAN_PATH];
+                    sdgame_folder(&s->games[i], folder, sizeof(folder));
+                    total += s->games[i].size;
+                    in_shop += strcmp(folder, installer_dir()) == 0;
+                }
+
+                if (!installer_storage_ok())
+                    snprintf(line, sizeof(line), "Carte SD introuvable");
+                else if (scanning)
+                    snprintf(line, sizeof(line), "Analyse de la carte SD…");
+                else
+                    snprintf(line, sizeof(line), "%d jeu%s sur la carte SD", s->count,
+                             s->count > 1 ? "x" : "");
+                gfx_text_box(c, &font_body, x, y, w, ALIGN_LEFT, line, COL_TEXT);
+                y += font_body.height + 4;
+
+                if (installer_storage_ok())
+                {
+                    snprintf(line, sizeof(line), "%d dossier%s parcouru%s%s", s->dirs,
+                             s->dirs > 1 ? "s" : "", s->dirs > 1 ? "s" : "",
+                             scanning ? "…" : "");
+                    gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+                    y += font_small.height + 1;
+                    format_size(size, sizeof(size), total);
+                    snprintf(line, sizeof(line), "Place prise par ces jeux : %s", size);
+                    gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+                    y += font_small.height + 1;
+                    snprintf(line, sizeof(line), "Dont dans le dossier de DSi Shop : %d", in_shop);
+                    gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+                    y += font_small.height + 5;
+                }
+                if (s->truncated)
+                {
+                    snprintf(line, sizeof(line), "Liste limitée aux %d premiers jeux.", SDSCAN_MAX);
+                    gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_WARN);
+                    y += font_small.height + 1;
+                }
+                gfx_text_wrap(c, &font_small, x, y, w, r.y + r.h - 4 - y,
+                              "Touche un jeu pour voir sa fiche : sauvegardes, suppression…",
+                              COL_TEXT_OFF);
+                break;
+            }
 
             if (st == INST_IDLE || st == INST_DONE)
             {
@@ -1058,6 +1188,11 @@ static uint32_t top_signature(void)
     MIX((uintptr_t)http_progress_text()[0]);
     MIX(net_signal_bars());
     MIX(installer_state());
+    MIX(app.install_tab);
+    MIX(app.sdscan.count);
+    MIX(app.sdscan.dirs);
+    MIX(app.sdscan.done);
+    MIX(app.sd_started);
     MIX(installer_log_count());
     MIX(installer_verbose());
     MIX(installer_progress_now() / 8192);
@@ -1110,18 +1245,53 @@ static void screen_home(canvas_t *c, const input_t *in)
     if (!app.games_loaded)
         refresh_games();
 
-    // Les deux grandes tuiles
-    if (ui_tile(c, RECT(8, 30, 116, 96), "Installer un jeu", "et gérer mes jeux",
+    // Les deux grandes tuiles : installer, et gérer tous les jeux de la carte SD
+    if (ui_tile(c, RECT(8, 27, 116, 84), "Installer un jeu", "GitHub ou un lien",
                 ICON_DOWNLOAD, true))
     {
         app.install_tab = TAB_INSTALL;
         go(SCREEN_INSTALL);
     }
+    if (ui_tile(c, RECT(132, 27, 116, 84), "Gérer les jeux", "tous ceux de la SD",
+                ICON_GAMES, false))
+    {
+        app.install_tab = TAB_SD;
+        sd_enter();
+        go(SCREEN_INSTALL);
+    }
 
+    // Raccourcis
+    const int bw = (SCREEN_W - 16 - 6) / 2;
+    if (ui_button(c, RECT(8, 115, bw, 22),
+                  net_state() == NET_CONNECTED ? "Wi-Fi \xE2\x80\xA2" : "Wi-Fi",
+                  BTN_STYLE_NORMAL, app.wifi_ok))
+        go(SCREEN_WIFI);
+    if (ui_button(c, RECT(8 + bw + 6, 115, bw, 22), "Plus…", BTN_STYLE_NORMAL, true))
+        go(SCREEN_MORE);
+
+    const char *warn = NULL;
+    if (!app.wifi_ok)
+        warn = "Le Wi-Fi n'a pas pu être initialisé";
+    else if (!installer_storage_ok())
+        warn = "Carte SD introuvable : installation impossible";
+    if (warn)
+    {
+        gfx_text_box(c, &font_small, 0, 139, SCREEN_W, ALIGN_CENTER, warn, COL_ERR);
+    }
+    else
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "Wi-Fi : %s", net_state_text());
+        gfx_text_box(c, &font_small, 0, 139, SCREEN_W, ALIGN_CENTER, line, COL_TEXT_OFF);
+    }
+
+    // Remote : une case en bas de l'écran
     const char *rsub = remote_state() == REMOTE_PAIRED ? "Connecté"
                      : lremote_enabled() ? "Local actif"
-                                         : "Local ou en ligne";
-    if (ui_tile(c, RECT(132, 30, 116, 96), "Remote", rsub, ICON_QR, false))
+                                         : "Commander la DSi depuis un téléphone";
+    bool active = remote_state() == REMOTE_PAIRED ||
+                  (lremote_enabled() && lremote_net_running());
+    if (ui_remote_box(c, RECT(8, 155, SCREEN_W - 16, 34), "Remote", rsub, active))
     {
         // Onglet par défaut : en ligne s'il y a un serveur et que la DSi y est
         // déjà associée, sinon le Remote local
@@ -1136,42 +1306,6 @@ static void screen_home(canvas_t *c, const input_t *in)
         }
         app.lr_editing = false;
         go(SCREEN_REMOTE);
-    }
-
-    // Raccourcis
-    char games[32];
-    snprintf(games, sizeof(games), "Jeux (%d)", app.ngames);
-    const int bw = (SCREEN_W - 16 - 2 * 6) / 3;
-    if (ui_button(c, RECT(8, 134, bw, 26), games, BTN_STYLE_NORMAL, true))
-    {
-        app.install_tab = TAB_GAMES;
-        refresh_games();
-        go(SCREEN_INSTALL);
-    }
-    if (ui_button(c, RECT(8 + bw + 6, 134, bw, 26),
-                  net_state() == NET_CONNECTED ? "Wi-Fi \xE2\x80\xA2" : "Wi-Fi",
-                  BTN_STYLE_NORMAL, app.wifi_ok))
-        go(SCREEN_WIFI);
-    if (ui_button(c, RECT(8 + (bw + 6) * 2, 134, bw, 26), "Plus…", BTN_STYLE_NORMAL,
-                  true))
-        go(SCREEN_MORE);
-
-    const char *warn = NULL;
-    if (!app.wifi_ok)
-        warn = "Le Wi-Fi n'a pas pu être initialisé";
-    else if (!installer_storage_ok())
-        warn = "Carte SD introuvable : installation impossible";
-    if (warn)
-    {
-        gfx_text_box(c, &font_small, 0, SCREEN_H - 20, SCREEN_W, ALIGN_CENTER, warn,
-                     COL_ERR);
-    }
-    else
-    {
-        char line[96];
-        snprintf(line, sizeof(line), "Wi-Fi : %s", net_state_text());
-        gfx_text_box(c, &font_small, 0, SCREEN_H - 20, SCREEN_W, ALIGN_CENTER, line,
-                     COL_TEXT_OFF);
     }
 }
 
@@ -1755,23 +1889,44 @@ static void screen_http(canvas_t *c, const input_t *in)
                      "Connecte-toi d'abord au Wi-Fi", COL_WARN);
 }
 
-// Ouvre la fiche d'un jeu (recalcule sauvegardes et version précédente)
+// Ouvre la fiche d'un jeu de DSi Shop (dossier d'installation)
 static void open_game(const game_t *g)
 {
     app.sel = *g;
-    app.sel_saves = games_find_saves(installer_dir(), g->file, NULL, 0);
-    app.sel_backup = games_has_backup(installer_dir(), g->file);
+    app.sel_from_sd = false;
+    snprintf(app.sel_dir, sizeof(app.sel_dir), "%s", installer_dir());
+    app.sel_saves = games_find_saves(app.sel_dir, g->file, NULL, 0);
+    app.sel_backup = games_has_backup(app.sel_dir, g->file);
+    go(SCREEN_GAME);
+}
+
+// Ouvre la fiche d'un jeu trouvé sur la carte (n'importe quel dossier)
+static void open_sd_game(const sdgame_t *sg)
+{
+    char dir[SDSCAN_PATH];
+    sdgame_folder(sg, dir, sizeof(dir));
+
+    game_t g;
+    games_get_record(dir, sdgame_name(sg), &g);   // Origine connue si DSi Shop l'a installé
+    g.size = sg->size;
+
+    app.sel = g;
+    app.sel_from_sd = true;
+    snprintf(app.sel_dir, sizeof(app.sel_dir), "%s", dir);
+    app.sel_saves = games_find_saves(app.sel_dir, g.file, NULL, 0);
+    app.sel_backup = games_has_backup(app.sel_dir, g.file);
     go(SCREEN_GAME);
 }
 
 // Recharge la fiche du jeu affiché (après une mise à jour par exemple)
 static void reload_selected(void)
 {
-    for (int i = 0; i < app.ngames; i++)
-        if (strcmp(app.games[i].file, app.sel.file) == 0)
-            app.sel = app.games[i];
-    app.sel_saves = games_find_saves(installer_dir(), app.sel.file, NULL, 0);
-    app.sel_backup = games_has_backup(installer_dir(), app.sel.file);
+    if (!app.sel_from_sd)
+        for (int i = 0; i < app.ngames; i++)
+            if (strcmp(app.games[i].file, app.sel.file) == 0)
+                app.sel = app.games[i];
+    app.sel_saves = games_find_saves(app.sel_dir, app.sel.file, NULL, 0);
+    app.sel_backup = games_has_backup(app.sel_dir, app.sel.file);
 }
 
 static const char *update_label(const game_t *g, uint16_t *color)
@@ -1884,25 +2039,110 @@ static void screen_games(canvas_t *c, const input_t *in)
         app.games_scroll++;
 }
 
+// Onglet "Toute la SD" : tous les jeux (.nds / .dsi) de la carte, quel que soit leur dossier
+static void screen_sd(canvas_t *c, const input_t *in)
+{
+    sdscan_t *s = &app.sdscan;
+    bool scanning = app.sd_started && !s->done;
+
+    int max_scroll = s->count - GAME_ROWS;
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (in->repeat & BTN_L)
+        app.sd_scroll--;
+    if (in->repeat & BTN_R)
+        app.sd_scroll++;
+    if (app.sd_scroll > max_scroll)
+        app.sd_scroll = max_scroll;
+    if (app.sd_scroll < 0)
+        app.sd_scroll = 0;
+
+    if (!installer_storage_ok())
+        gfx_text_wrap(c, &font_small, 16, GAMES_Y + 16, SCREEN_W - 32, 60,
+                      "Carte SD introuvable.", COL_ERR);
+    else if (s->count == 0)
+        gfx_text_wrap(c, &font_small, 16, GAMES_Y + 16, SCREEN_W - 32, 80,
+                      scanning ? "Analyse de la carte SD…"
+                               : "Aucun jeu (.nds / .dsi) trouvé sur la carte SD.",
+                      COL_TEXT_DIM);
+
+    for (int row = 0; row < GAME_ROWS; row++)
+    {
+        int i = app.sd_scroll + row;
+        if (i >= s->count)
+            break;
+        const sdgame_t *g = &s->games[i];
+
+        char folder[SDSCAN_PATH], size[24], sub[SDSCAN_PATH + 32];
+        sdgame_folder(g, folder, sizeof(folder));
+        format_size(size, sizeof(size), g->size);
+        snprintf(sub, sizeof(sub), "%s · %s", size, folder);
+
+        bool in_shop = strcmp(folder, installer_dir()) == 0;
+        rect_t r = RECT(8, GAMES_Y + row * (GAME_ROW_H + 4), SCREEN_W - 16 - 12, GAME_ROW_H);
+        if (ui_list_item(c, r, sdgame_name(g), sub, in_shop ? "DSi Shop" : "",
+                         COL_ACCENT))
+        {
+            open_sd_game(g);
+            return;
+        }
+    }
+
+    if (s->count > GAME_ROWS)
+    {
+        int track_h = GAME_ROWS * (GAME_ROW_H + 4) - 4;
+        int thumb_h = track_h * GAME_ROWS / s->count;
+        int thumb_y = GAMES_Y + (track_h - thumb_h) * app.sd_scroll / max_scroll;
+        gfx_fill_round_rect(c, SCREEN_W - 12, GAMES_Y, 4, track_h, 2, COL_PANEL);
+        gfx_fill_round_rect(c, SCREEN_W - 12, thumb_y, 4, thumb_h, 2, COL_ACCENT);
+    }
+
+    // Barre du bas : défilement, nouvelle analyse, retour
+    int by = SCREEN_H - 28;
+    if (ui_button(c, RECT(8, by, 30, 22), "\xE2\x86\x91", BTN_STYLE_NORMAL, app.sd_scroll > 0))
+        app.sd_scroll--;
+
+    char scan_label[40] = "Rescanner";
+    if (scanning)
+        snprintf(scan_label, sizeof(scan_label), "Analyse… %d", s->count);
+    if (ui_button(c, RECT(42, by, 104, 22), scan_label, BTN_STYLE_PRIMARY,
+                  !scanning && installer_storage_ok()))
+        sd_start_scan();
+
+    if (ui_button(c, RECT(150, by, 64, 22), "Retour", BTN_STYLE_NORMAL, true) ||
+        (in->down & BTN_B))
+        go(SCREEN_HOME);
+    if (ui_button(c, RECT(218, by, 30, 22), "\xE2\x86\x93", BTN_STYLE_NORMAL,
+                  app.sd_scroll < max_scroll))
+        app.sd_scroll++;
+}
+
 static void screen_install(canvas_t *c, const input_t *in)
 {
-    ui_header(c, "Installer un jeu", NULL);
+    ui_header(c, app.install_tab == TAB_SD ? "Gérer les jeux" : "Installer un jeu", NULL);
 
     char games_label[32];
     snprintf(games_label, sizeof(games_label), "Mes jeux (%d)", app.ngames);
-    const char *const tabs[2] = { "Installer", games_label };
-    int tab = ui_tabs(c, RECT(8, 26, SCREEN_W - 16, 20), tabs, 2, app.install_tab);
+    const char *const tabs[3] = { "Installer", games_label, "Toute la SD" };
+    int tab = ui_tabs(c, RECT(8, 26, SCREEN_W - 16, 20), tabs, 3, app.install_tab);
     if (tab != app.install_tab)
     {
         app.install_tab = tab;
         if (tab == TAB_GAMES)
             refresh_games();
+        else if (tab == TAB_SD)
+            sd_enter();
         app.force_redraw = true;
     }
 
     if (app.install_tab == TAB_GAMES)
     {
         screen_games(c, in);
+        return;
+    }
+    if (app.install_tab == TAB_SD)
+    {
+        screen_sd(c, in);
         return;
     }
 
@@ -2044,7 +2284,9 @@ static void screen_install(canvas_t *c, const input_t *in)
 static void back_to_games(void)
 {
     refresh_games();
-    app.install_tab = TAB_GAMES;
+    app.install_tab = app.sel_from_sd ? TAB_SD : TAB_GAMES;
+    if (app.sel_from_sd)
+        sd_enter();       // Ré-analyse seulement si la carte a changé
     go(SCREEN_INSTALL);
 }
 
@@ -2056,13 +2298,16 @@ static void screen_game(canvas_t *c, const input_t *in)
     bool busy = install_busy() || installer_checking();
     bool online = net_state() == NET_CONNECTED;
     bool tracked = games_is_tracked(g);
+    bool in_shop_dir = strcmp(app.sel_dir, installer_dir()) == 0;
 
     // Ligne d'état de la mise à jour
     const char *latest;
     upd_status_t st = installer_update_status(g->file, &latest);
-    char line[128];
+    char line[256];
     uint16_t col = COL_TEXT_DIM;
-    if (!tracked)
+    if (!in_shop_dir)
+        snprintf(line, sizeof(line), "Dossier : %s", app.sel_dir);
+    else if (!tracked)
         snprintf(line, sizeof(line), "Installé à la main : pas de mise à jour auto");
     else if (st == UPD_AVAILABLE)
     {
@@ -2084,7 +2329,7 @@ static void screen_game(canvas_t *c, const input_t *in)
     int y = 44;
 
     if (ui_button(c, RECT(x, y, w, h), "Mettre à jour", BTN_STYLE_PRIMARY,
-                  tracked && online && !busy))
+                  tracked && in_shop_dir && online && !busy))
     {
         if (!installer_update(g->file, false))
             ui_toast("Impossible de lancer la mise à jour");
@@ -2112,7 +2357,8 @@ static void screen_game(canvas_t *c, const input_t *in)
     }
     y += h + gap;
 
-    if (ui_button(c, RECT(x, y, w, h), "Désinstaller", BTN_STYLE_DANGER, !busy))
+    if (ui_button(c, RECT(x, y, w, h), in_shop_dir ? "Désinstaller" : "Supprimer le jeu",
+                  BTN_STYLE_DANGER, !busy))
     {
         app.confirm = CONFIRM_UNINSTALL;
         go(SCREEN_CONFIRM);
@@ -2160,13 +2406,14 @@ static void screen_confirm(canvas_t *c, const input_t *in)
 
     if (ui_button(c, RECT(BTN_X0, 106, BTN_W, BTN_H), action, style, !install_busy()))
     {
-        const char *dir = installer_dir();
+        const char *dir = app.sel_dir;
         char msg[96];
         switch (app.confirm)
         {
             case CONFIRM_UNINSTALL:
                 if (games_uninstall(dir, g->file))
                 {
+                    app.sd_dirty = true;
                     back_to_games();
                     ui_toast("Jeu désinstallé");
                 }
@@ -2638,6 +2885,7 @@ static void handle_background_events(void)
         else if (st == INST_DONE)
         {
             refresh_games();
+            app.sd_dirty = true;
             if (installer_was_remote())
             {
                 // Pas de redémarrage automatique : on peut en enchaîner plusieurs
@@ -2669,6 +2917,7 @@ static void handle_background_events(void)
         {
             case REMOTE_EV_GAMES_CHANGED:
                 refresh_games();
+                app.sd_dirty = true;
                 ui_toast("Jeu désinstallé depuis le Remote");
                 app.force_redraw = true;
                 break;
@@ -2693,6 +2942,7 @@ void app_frame(const input_t *in)
     app.frame++;
 
     handle_background_events();
+    sd_scan_tick();
 
     ui_begin(in);
 
@@ -2710,6 +2960,8 @@ void app_frame(const input_t *in)
                          app.screen == SCREEN_INSTALL_DONE ||
                          (app.screen == SCREEN_INSTALL && install_busy()) ||
                          (app.screen == SCREEN_TWL && twl_busy()) ||
+                         (app.screen == SCREEN_INSTALL && app.install_tab == TAB_SD &&
+                          app.sd_started && !app.sdscan.done) ||
                          (app.screen == SCREEN_ABOUT && self_busy()) ||
                          (app.screen == SCREEN_REMOTE && remote_pair_url()[0] == '\0');
 

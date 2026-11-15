@@ -27,6 +27,8 @@ bool installer_init(void);
 bool installer_storage_ok(void);
 // Dossier où les jeux sont installés (ex. "sd:/roms/nds")
 const char *installer_dir(void);
+// Racine de la carte ("sd:" en mode DSi, "fat:" sur un linker)
+const char *installer_root(void);
 // Petits réglages enregistrés sur la carte SD (dossier _dsishop)
 bool installer_pref_get(const char *name, char *out, size_t size);
 void installer_pref_set(const char *name, const char *value);
