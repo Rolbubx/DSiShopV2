@@ -9,6 +9,10 @@ tab-separated search API for the console (easy to parse in C):
     GET /user?name=who   -> same format, only that owner's projects
     GET /health          -> "ok <number of projects> <last crawl time>"
 
+Universal-DB (db.universal-team.net) is the main source: one request every few
+hours gives a hand-curated list of DS/DSi homebrew with GitHub links. The GitHub
+crawl below only completes it (projects Universal-DB does not list).
+
 TWiLight Menu++ updates: the official release is a .7z the console cannot
 decompress (16 MB LZMA dictionary), so it is repacked here into small .zip
 packets the console downloads and extracts one by one:
@@ -24,6 +28,7 @@ Run behind a reverse proxy (Caddy) that does the HTTPS. Optional environment:
     CATALOG_FILE   where the catalog is stored (default: catalog.json)
     PORT           listen port on 127.0.0.1 (default: 8081)
     TWILIGHT_DIR   where the TWiLight Menu++ packets are kept (default: twilight)
+    UDB_FILE       cache of the Universal-DB list (default: udb.json)
 """
 import hashlib
 import json
@@ -56,6 +61,105 @@ lock = threading.Lock()
 catalog = {}       # "owner/name" -> {owner, name, stars, tag, desc, checked}
 last_crawl = 0.0
 user_cache = {}    # login -> (timestamp, [entries])
+
+
+# ---------------------------------------------------------------------------
+# Universal-DB: curated list of DS/DSi homebrew (one request, no GitHub limits)
+# ---------------------------------------------------------------------------
+
+UDB_URL = os.environ.get("UDB_URL", "https://db.universal-team.net/data/full.json")
+UDB_FILE = os.environ.get("UDB_FILE", "udb.json")
+UDB_EVERY = 6 * 3600
+UDB_MAX = 30 * 1024 * 1024
+GITHUB_RE = re.compile(r"[A-Za-z0-9\-]{1,39}/[A-Za-z0-9._\-]{1,100}")
+
+udb = {}              # "owner/name" (lower case) -> entry, same shape as catalog
+udb_checked = 0.0
+
+
+def clean(text, limit):
+    return re.sub(r"[\t\r\n]+", " ", str(text or "")).strip()[:limit]
+
+
+def udb_entries(data):
+    """DS/DSi projects of a Universal-DB list that DSi Shop can install:
+    hosted on GitHub, with a .nds / .dsi / .zip file."""
+    out = {}
+    if not isinstance(data, list):
+        return out
+    for a in data:
+        if not isinstance(a, dict):
+            continue
+        systems = {str(s).upper() for s in (a.get("systems") or [])}
+        gh = a.get("github") or ""
+        if not systems & {"DS", "DSI"} or not GITHUB_RE.fullmatch(gh):
+            continue
+        files = [str(n).lower() for n in (a.get("downloads") or {})]
+        if not any(n.endswith(EXTENSIONS) for n in files):
+            continue
+        try:
+            stars = int(a.get("stars") or 0)
+        except (TypeError, ValueError):
+            stars = 0
+        owner, name = gh.split("/")
+        out[gh.lower()] = {"owner": owner, "name": name, "stars": stars,
+                           "tag": clean(a.get("version"), 40),
+                           "desc": clean(a.get("description"), 120),
+                           "checked": time.time()}
+    return out
+
+
+def udb_refresh():
+    """Download the list, keep the old one if anything goes wrong."""
+    global udb_checked
+    udb_checked = time.time()
+    try:
+        req = urllib.request.Request(UDB_URL, headers={"User-Agent": "dsishop-catalog"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read(UDB_MAX + 1)
+        if len(raw) > UDB_MAX:
+            raise ValueError("list too big")
+        entries = udb_entries(json.loads(raw))
+        if not entries:
+            raise ValueError("no DS/DSi project found")
+    except Exception as e:
+        print("udb: refresh failed:", e, flush=True)
+        return
+    with lock:
+        udb.clear()
+        udb.update(entries)
+    tmp = UDB_FILE + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+    os.replace(tmp, UDB_FILE)
+    print("udb: %d DS/DSi projects" % len(entries), flush=True)
+
+
+def udb_load():
+    global udb_checked
+    try:
+        with open(UDB_FILE, "rb") as f:
+            entries = udb_entries(json.load(f))
+        with lock:
+            udb.update(entries)
+        udb_checked = os.path.getmtime(UDB_FILE)
+    except (OSError, ValueError):
+        pass
+
+
+def udb_loop():
+    while True:
+        if time.time() - udb_checked > UDB_EVERY:
+            udb_refresh()
+        time.sleep(300)
+
+
+def merged():
+    """Universal-DB entries first, completed by what the GitHub crawl found."""
+    with lock:
+        out = {k.lower(): e for k, e in catalog.items()}
+        out.update(udb)
+    return list(out.values())
 
 
 def api(path):
@@ -181,15 +285,14 @@ def lines(entries):
 def search(query, limit):
     words = [w for w in re.split(r"\s+", query.lower().strip()) if w]
     scored = []
-    with lock:
-        for e in catalog.values():
-            hay_name = (e["name"] + " " + e["owner"]).lower()
-            hay = hay_name + " " + e["desc"].lower()
-            if not all(w in hay for w in words):
-                continue
-            # Name matches first, then by stars
-            in_name = all(w in hay_name for w in words)
-            scored.append((not in_name, -e["stars"], e))
+    for e in merged():
+        hay_name = (e["name"] + " " + e["owner"]).lower()
+        hay = hay_name + " " + e["desc"].lower()
+        if not all(w in hay for w in words):
+            continue
+        # Name matches first, then by stars
+        in_name = all(w in hay_name for w in words)
+        scored.append((not in_name, -e["stars"], e))
     scored.sort(key=lambda t: t[:2])
     return [t[2] for t in scored[:limit]]
 
@@ -247,8 +350,7 @@ def augment(query):
 
 
 def user_projects(login, limit):
-    with lock:
-        mine = [e for e in catalog.values() if e["owner"].lower() == login.lower()]
+    mine = [e for e in merged() if e["owner"].lower() == login.lower()]
     if mine:
         return sorted(mine, key=lambda e: -e["stars"])[:limit]
     cached = user_cache.get(login.lower())
@@ -674,9 +776,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             limit = 30
         if url.path == "/health":
-            with lock:
-                n = len(catalog)
-            self.reply(200, "ok %d %d\n" % (n, last_crawl))
+            self.reply(200, "ok %d %d\n" % (len(merged()), last_crawl))
         elif url.path == "/search":
             q = qs.get("q", [""])[0][:60]
             if not re.fullmatch(r"[\w .\-]+", q):
@@ -700,6 +800,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     load()
+    udb_load()
+    threading.Thread(target=udb_loop, daemon=True).start()
     twl_load()
     threading.Thread(target=crawl_loop, daemon=True).start()
     print("listening on 127.0.0.1:%d" % PORT, flush=True)

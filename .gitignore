@@ -16,3 +16,4 @@ catalog.json
 __pycache__/
 tools/test/test_sysupdate
 tools/test/test_twlini
+udb.json

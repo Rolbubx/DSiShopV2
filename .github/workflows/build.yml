@@ -63,6 +63,8 @@ jobs:
         run: make -C tools/test check BIG=--big OUT=$RUNNER_TEMP/zip_tests
       - name: Serveur du catalogue (paquets TWiLight Menu++)
         run: python3 catalog-server/test_twilight.py
+      - name: Serveur du catalogue (source Universal-DB)
+        run: python3 catalog-server/test_udb.py
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots

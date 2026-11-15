@@ -185,6 +185,18 @@ Si le jeu plante après une mise à jour, **Supprimer les sauvegardes** efface
 rangent leurs données ailleurs (leur propre dossier sur la SD) ne sont pas concernés.
 La désinstallation garde les sauvegardes, pour les retrouver si tu réinstalles.
 
+## Catalogue de jeux
+
+La recherche et « Parcourir » interrogent le serveur du catalogue (`catalog-server/catalog.py`).
+Sa source principale est **Universal-DB** (db.universal-team.net) : une seule requête toutes
+les 6 heures donne la liste triée à la main des projets DS/DSi hébergés sur GitHub avec un
+`.nds`, `.dsi` ou `.zip` (environ 70 projets), sans limite de débit GitHub. L'exploration de
+GitHub (par mots-clés) ne fait que compléter cette liste ; un projet présent dans les deux
+n'apparaît qu'une fois. La console n'a rien de spécial à savoir : elle reçoit toujours les
+mêmes lignes « auteur / projet / étoiles / version / description » et installe la dernière
+release GitHub du projet. La liste est gardée dans `udb.json` (`UDB_FILE`) pour repartir
+tout de suite après un redémarrage. Tests : `python3 catalog-server/test_udb.py`.
+
 ## Mettre à jour TWiLight Menu++
 
 Menu **Plus → Mettre à jour TWiLight Menu++** : l'appli compare la version installée
