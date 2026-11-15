@@ -33,6 +33,8 @@ jobs:
           ./tools/sim/dsishop_sim screenshots
       - name: Tests ZIP / fichiers découpés (dont une archive ZIP64 de 4,5 Go creuse)
         run: make -C tools/test check BIG=--big OUT=$RUNNER_TEMP/zip_tests
+      - name: Serveur du catalogue (paquets TWiLight Menu++)
+        run: python3 catalog-server/test_twilight.py
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots

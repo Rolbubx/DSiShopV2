@@ -37,6 +37,7 @@ typedef enum {
     SCREEN_MORE,          // Test Internet, À propos, Quitter
     SCREEN_BROWSE_USER,   // Clavier : nom d'utilisateur GitHub à parcourir
     SCREEN_BROWSE,        // Liste des projets de cet utilisateur
+    SCREEN_TWL,           // Mise à jour de TWiLight Menu++
 } app_screen_t;
 
 // Actions qui demandent une confirmation
@@ -175,11 +176,17 @@ static bool install_busy(void)
     return s >= INST_RESOLVING && s <= INST_VERIFYING;
 }
 
+static bool twl_busy(void)
+{
+    twl_state_t s = installer_twl_state();
+    return s == TWL_CHECKING || s == TWL_UPDATING;
+}
+
 static bool net_busy(void)
 {
     net_state_t s = net_state();
     return s == NET_CONNECTING || s == NET_SCANNING || http_state() == HTTP_BUSY ||
-           install_busy();
+           install_busy() || twl_busy();
 }
 
 // "4,2 Go", "1,4 Mo", "820 Ko"...
@@ -891,6 +898,46 @@ static void draw_top(canvas_t *c)
             break;
         }
 
+        case SCREEN_TWL:
+        {
+            gfx_text(c, &font_title, 12, 30, "TWiLight Menu++", COL_TEXT);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+
+            twl_state_t st = installer_twl_state();
+            const char *inst_ver = installer_twl_installed();
+            char text[400];
+            if (st == TWL_UPDATING)
+                snprintf(text, sizeof(text),
+                         "Mise à jour vers %s en cours.\n"
+                         "\n"
+                         "N'éteins pas la console et ne retire pas la carte SD.\n"
+                         "\n"
+                         "Si ça coupe quand même, relance la mise à jour : elle "
+                         "reprend au paquet où elle s'était arrêtée.",
+                         installer_twl_latest());
+            else if (st == TWL_DONE)
+                snprintf(text, sizeof(text),
+                         "TWiLight Menu++ %s est installé.\n"
+                         "\n"
+                         "Redémarre la console pour l'utiliser. Tes réglages, tes "
+                         "jeux et tes sauvegardes n'ont pas été touchés.",
+                         installer_twl_latest());
+            else
+                snprintf(text, sizeof(text),
+                         "Version installée : %s\n"
+                         "Dernière version : %s\n"
+                         "\n"
+                         "La mise à jour est téléchargée en petits paquets, vérifiés "
+                         "puis installés un par un sur la carte SD. Tes réglages, tes "
+                         "jeux et tes sauvegardes sont conservés.",
+                         inst_ver[0] ? inst_ver : "inconnue",
+                         installer_twl_latest()[0] ? installer_twl_latest() : "…");
+            gfx_text_wrap(c, &font_small, r.x + 8, r.y + 6, r.w - 16, r.h - 12, text,
+                          COL_TEXT_DIM);
+            break;
+        }
+
         case SCREEN_ABOUT:
         {
             gfx_text(c, &font_title, 12, 30, "À propos", COL_TEXT);
@@ -942,6 +989,9 @@ static uint32_t top_signature(void)
         installer_check_progress(&done, &total);
         MIX(done);
     }
+    MIX(installer_twl_state());
+    MIX(strlen(installer_twl_installed()));
+    MIX(strlen(installer_twl_latest()));
     MIX(remote_state());
     MIX(strlen(remote_status_text()));
     MIX(strlen(remote_owner_name()));
@@ -1040,8 +1090,17 @@ static void screen_more(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Plus", NULL);
 
-    const int bh = 26, step = 30;
-    int y = 30;
+    const int bh = 22, step = 26;
+    int y = 28;
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Mettre à jour TWiLight Menu++",
+                  BTN_STYLE_NORMAL, true))
+    {
+        go(SCREEN_TWL);
+        // Demande tout de suite la dernière version (sauf mise à jour en cours)
+        if (installer_twl_present() && net_state() == NET_CONNECTED && !twl_busy())
+            installer_twl_check();
+    }
+    y += step;
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Test Internet (HTTP)",
                   BTN_STYLE_NORMAL, net_state() == NET_CONNECTED))
         go(SCREEN_HTTP);
@@ -2165,6 +2224,120 @@ static void screen_install_done(canvas_t *c, const input_t *in)
         app.reboot = true;
 }
 
+// Mise à jour de TWiLight Menu++ (paquets servis par le serveur du catalogue)
+static void screen_twl(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "TWiLight Menu++", NULL);
+
+    twl_state_t st = installer_twl_state();
+    bool online = net_state() == NET_CONNECTED;
+    const int by = 104;   // Bouton principal
+    bool back = true;     // Bouton Retour affiché
+    char line[160];
+
+    if (!installer_twl_present())
+    {
+        gfx_text_wrap(c, &font_small, 16, 40, SCREEN_W - 32, 60,
+                      "TWiLight Menu++ n'a pas été trouvé sur la carte SD de la "
+                      "console : rien à mettre à jour.", COL_TEXT_DIM);
+    }
+    else if (st == TWL_CHECKING)
+    {
+        ui_spinner(c, SCREEN_W / 2, 56, 8, app.frame, COL_ACCENT);
+        gfx_text_box(c, &font_body, 8, 74, SCREEN_W - 16, ALIGN_CENTER,
+                     "Recherche de la dernière version…", COL_TEXT);
+    }
+    else if (st == TWL_UPDATING)
+    {
+        int pack, packs;
+        uint64_t now, total;
+        char a[24], b[24];
+        installer_twl_progress(&pack, &packs, &now, &total);
+        snprintf(line, sizeof(line), "Paquet %d sur %d", pack, packs);
+        gfx_text_box(c, &font_body, 8, 40, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+        draw_progress_bar(c, RECT(BTN_X0, 64, BTN_W, 10), now, total ? total : 1);
+        format_size(a, sizeof(a), now);
+        format_size(b, sizeof(b), total);
+        snprintf(line, sizeof(line), "%s / %s", a, b);
+        gfx_text_box(c, &font_small, 8, 80, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT_DIM);
+
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), "Annuler", BTN_STYLE_DANGER, true))
+            installer_cancel();
+        gfx_text_box(c, &font_small, 0, SCREEN_H - 20, SCREEN_W, ALIGN_CENTER,
+                     "N'éteins pas la console", COL_WARN);
+        back = false;
+    }
+    else if (st == TWL_DONE)
+    {
+        draw_check(c, SCREEN_W / 2, 48, COL_OK);
+        snprintf(line, sizeof(line), "TWiLight Menu++ %s installé", installer_twl_latest());
+        gfx_text_box(c, &font_body, 8, 64, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), "Redémarrer la console",
+                      BTN_STYLE_PRIMARY, true))
+            app.reboot = true;
+    }
+    else if (st == TWL_READY)
+    {
+        const char *have = installer_twl_installed(), *latest = installer_twl_latest();
+        bool same = strcmp(have, latest) == 0;
+        int resume = installer_twl_resume();
+
+        snprintf(line, sizeof(line), "Installée : %s", have[0] ? have : "inconnue");
+        gfx_text_box(c, &font_body, 8, 36, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+        snprintf(line, sizeof(line), "Disponible : %s", latest);
+        gfx_text_box(c, &font_body, 8, 36 + font_body.height + 2, SCREEN_W - 16,
+                     ALIGN_CENTER, line, same && !resume ? COL_TEXT : COL_OK);
+        if (resume)
+            gfx_text_box(c, &font_small, 8, 80, SCREEN_W - 16, ALIGN_CENTER,
+                         "Une mise à jour a été interrompue", COL_WARN);
+        else if (same)
+            gfx_text_box(c, &font_small, 8, 80, SCREEN_W - 16, ALIGN_CENTER,
+                         "TWiLight Menu++ est à jour", COL_TEXT_DIM);
+
+        const char *label = resume ? "Reprendre la mise à jour"
+                          : same ? "Réinstaller cette version" : "Mettre à jour";
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), label,
+                      same && !resume ? BTN_STYLE_NORMAL : BTN_STYLE_PRIMARY, online))
+        {
+            if (!installer_twl_update())
+                ui_toast("Impossible de lancer la mise à jour");
+        }
+    }
+    else
+    {
+        // Pas encore vérifié, ou erreur
+        if (st == TWL_ERROR)
+            gfx_text_wrap(c, &font_small, 16, 34, SCREEN_W - 32, 66,
+                          installer_twl_message(), COL_ERR);
+        else
+            gfx_text_wrap(c, &font_small, 16, 40, SCREEN_W - 32, 60,
+                          "Vérifie s'il existe une nouvelle version de TWiLight "
+                          "Menu++ et installe-la sur la carte SD.", COL_TEXT_DIM);
+
+        bool retry_update = st == TWL_ERROR && installer_twl_latest()[0] != '\0';
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H),
+                      retry_update ? "Reprendre la mise à jour"
+                                   : st == TWL_ERROR ? "Réessayer" : "Vérifier",
+                      BTN_STYLE_PRIMARY, online))
+        {
+            bool ok = retry_update ? installer_twl_update() : installer_twl_check();
+            if (!ok)
+                ui_toast("Impossible de lancer la mise à jour");
+        }
+    }
+
+    if (back)
+    {
+        if (ui_button(c, RECT(BTN_X0, by + BTN_H + 6, BTN_W, BTN_H), "Retour",
+                      BTN_STYLE_NORMAL, true) ||
+            (in->down & BTN_B))
+            go(SCREEN_MORE);
+        if (!online && installer_twl_present() && st != TWL_DONE)
+            gfx_text_box(c, &font_small, 0, SCREEN_H - 16, SCREEN_W, ALIGN_CENTER,
+                         "Connecte-toi d'abord au Wi-Fi", COL_WARN);
+    }
+}
+
 static void screen_about(canvas_t *c, const input_t *in)
 {
     ui_header(c, "À propos", NULL);
@@ -2287,6 +2460,7 @@ void app_frame(const input_t *in)
                           installer_browse_state() == BROWSE_LOADING) ||
                          app.screen == SCREEN_INSTALL_DONE ||
                          (app.screen == SCREEN_INSTALL && install_busy()) ||
+                         (app.screen == SCREEN_TWL && twl_busy()) ||
                          (app.screen == SCREEN_REMOTE && remote_pair_url()[0] == '\0');
 
     app_screen_t drawn = app.screen;
@@ -2315,6 +2489,7 @@ void app_frame(const input_t *in)
             case SCREEN_MORE:     screen_more(c, in); break;
             case SCREEN_BROWSE_USER: screen_browse_user(c, in); break;
             case SCREEN_BROWSE:   screen_browse(c, in); break;
+            case SCREEN_TWL:      screen_twl(c, in); break;
         }
 
         ui_draw_toast(c);

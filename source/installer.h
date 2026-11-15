@@ -101,6 +101,34 @@ const char *installer_browse_user(void);
 int installer_browse_count(void);
 const browse_repo_t *installer_browse_get(int index);
 
+// ---------------------------------------------------------------------------
+// Mise à jour de TWiLight Menu++ (voir sysupdate.h)
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    TWL_IDLE,
+    TWL_CHECKING,   // Demande la dernière version au serveur
+    TWL_READY,      // Version connue : on peut lancer la mise à jour
+    TWL_UPDATING,
+    TWL_DONE,
+    TWL_ERROR,
+} twl_state_t;
+
+// TWiLight Menu++ est-il installé sur la carte SD de la console ?
+bool installer_twl_present(void);
+// Interroge le serveur (en arrière-plan) : état TWL_READY ou TWL_ERROR
+bool installer_twl_check(void);
+// Télécharge et applique les paquets (en arrière-plan), après TWL_READY
+bool installer_twl_update(void);
+twl_state_t installer_twl_state(void);
+const char *installer_twl_message(void);    // Message d'erreur
+const char *installer_twl_installed(void);  // Version installée ("" si inconnue)
+const char *installer_twl_latest(void);     // Version proposée par le serveur
+// Paquet où reprendrait une mise à jour interrompue (0 : depuis le début)
+int installer_twl_resume(void);
+// Avancement : paquet en cours (à partir de 1), nombre de paquets, octets
+void installer_twl_progress(int *pack, int *packs, uint64_t *now, uint64_t *total);
+
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);
 // Espace libre sur la carte SD en octets (0 si inconnu)

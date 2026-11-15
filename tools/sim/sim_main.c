@@ -181,6 +181,21 @@ int main(int argc, char **argv)
     press(BTN_B);
     frames(2);
     save(dir, "07_menu_remote_actif");
+
+    // Plus -> Mettre à jour TWiLight Menu++
+    press(BTN_B);
+    frames(2);
+    tap(214, 147);             // Raccourci "Plus"
+    frames(2);
+    save(dir, "08_plus");
+    tap(128, 39);              // Mettre à jour TWiLight Menu++
+    frames(30);
+    save(dir, "09_twilight_version");
+    tap(128, 119);             // Mettre à jour
+    frames(80);
+    save(dir, "10_twilight_paquets");
+    frames(120);
+    save(dir, "11_twilight_termine");
     lremote_net_stop();
         return 0;
 }

@@ -30,6 +30,16 @@ zip_err_t zip_extract_rom(sfile_t *zip, const char *out_path,
                           char *name_out, size_t name_size,
                           zip_progress_t progress, void *userdata);
 
+// Longueur max d'un chemin dans une archive extraite en entier
+#define ZIP_PATH_MAX 200
+
+// Extrait tous les fichiers de l'archive dans dest_dir (en créant les
+// dossiers), en remplaçant les fichiers existants. L'archive est refusée en
+// bloc (ZIP_ERR_FORMAT) si un chemin est dangereux ("..", absolu, caractère
+// interdit par FAT). La progression porte sur l'ensemble de l'archive.
+zip_err_t zip_extract_all(sfile_t *zip, const char *dest_dir,
+                          zip_progress_t progress, void *userdata);
+
 const char *zip_strerror(zip_err_t err);
 
 #endif // ZIP_H__

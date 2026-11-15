@@ -56,6 +56,7 @@ source/
   installer.c/.h  installation de jeux (API GitHub, libcurl, vérif ROM)
   splitfile.c/.h  fichier découpé en morceaux de 1 Go (limite FAT32 de 4 Go)
   zip.c/.h      extraction ZIP / ZIP64 (portable, testé sur PC)
+  sysupdate.c/.h  mise à jour de TWiLight Menu++ par paquets (portable, testé sur PC)
   cacert.s      embarque data/cacert.pem (certificats racines)
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
@@ -72,7 +73,9 @@ tools/
   gen_font.py   régénère font_data.c (Pillow + police Inter)
   gen_icon.py   régénère icon.gif
   sim/          simulateur PC : exécute app/ui/gfx avec un faux réseau et sort des captures
-  test/         tests PC de zip.c, splitfile.c, games.c, remote_proto.c
+  test/         tests PC de zip.c, splitfile.c, sysupdate.c, games.c, remote_proto.c
+catalog-server/ serveur du catalogue (Python sans dépendance) : recherche de jeux,
+                relais GitHub, paquets de mise à jour de TWiLight Menu++
 remote-server/  serveur du Remote (Node.js sans dépendance) + site web pour le téléphone
 ```
 
@@ -180,6 +183,43 @@ Si le jeu plante après une mise à jour, **Supprimer les sauvegardes** efface
 `saves/` (le dossier par défaut de TWiLight Menu++), après confirmation. Les jeux qui
 rangent leurs données ailleurs (leur propre dossier sur la SD) ne sont pas concernés.
 La désinstallation garde les sauvegardes, pour les retrouver si tu réinstalles.
+
+## Mettre à jour TWiLight Menu++
+
+Menu **Plus → Mettre à jour TWiLight Menu++** : l'appli compare la version installée
+(`version.txt` à la racine de la carte SD) avec la dernière release, puis l'installe.
+
+La release officielle est un `.7z` compressé avec un dictionnaire de 16 Mo : impossible
+à décompresser sur une DSi (16 Mo de RAM en tout). C'est donc le **serveur du catalogue**
+(`catalog-server/catalog.py`) qui la télécharge, l'extrait et la redécoupe en petits
+paquets `.zip` (8 Mo extraits au plus, sauf un fichier plus gros, seul dans son paquet) :
+
+- la console télécharge un paquet, vérifie son SHA-256, l'extrait, le supprime, puis
+  passe au suivant ;
+- chaque fichier est écrit à côté de sa destination puis la remplace : une coupure ne
+  laisse jamais un fichier à moitié écrit ;
+- le numéro du prochain paquet est noté dans `_dsishop/twilight.state` : après une
+  coupure, la mise à jour **reprend** au paquet où elle s'était arrêtée ;
+- `BOOT.NDS` et `version.txt` sont dans le **dernier** paquet : tant que la mise à jour
+  n'est pas finie, l'ancien menu démarre encore et l'ancienne version reste affichée ;
+- les fichiers de `title/` (hiyaCFW) et `ntrboot.nds` ne sont mis à jour que s'ils
+  existent déjà sur la carte ; `roms/`, les réglages et les sauvegardes ne sont jamais
+  touchés. Rien n'est écrit sur la NAND.
+
+Seule la carte SD de la console est gérée (mode DSi), pas les linkers.
+
+Côté serveur, il faut une commande 7-Zip (`7zz`, `7z`, `7za`, `7zr` ou `bsdtar`) :
+
+```sh
+sudo apt install p7zip-full
+python3 catalog-server/catalog.py      # les paquets vont dans ./twilight (TWILIGHT_DIR)
+```
+
+Le premier appel à `/twilight/manifest` lance la préparation en arrière-plan (réponse
+503 en attendant, la console propose de réessayer) ; ensuite une nouvelle release est
+cherchée toutes les 30 minutes. Tests : `python3 catalog-server/test_twilight.py`, et
+`make -C tools/test check` qui applique de vrais paquets du serveur avec le code de la
+console sur une fausse carte SD (coupure, reprise, paquet corrompu).
 
 ## Remote local
 

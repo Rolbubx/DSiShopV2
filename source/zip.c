@@ -1,8 +1,10 @@
 // Extraction ZIP / ZIP64 (méthodes "stored" et "deflate")
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 #include <zlib.h>
 
@@ -132,6 +134,113 @@ static zip_err_t find_central_dir(sfile_t *sf, uint64_t *cd_offset,
     return ZIP_OK;
 }
 
+// Décompresse une entrée dans out_path (vérifie taille et CRC). La progression
+// annoncée est base + octets écrits, sur un total de `total`.
+static zip_err_t extract_entry(sfile_t *sf, const entry_t *e, const char *out_path,
+                               zip_progress_t progress, void *userdata,
+                               uint64_t base, uint64_t total)
+{
+    zip_err_t err;
+
+    if (e->method != 0 && e->method != 8)
+        return ZIP_ERR_METHOD;
+    if (e->uncomp_size >= FAT32_MAX)
+        return ZIP_ERR_TOO_BIG;
+
+    // En-tête local : sa taille de champ "extra" peut différer du central
+    uint8_t lh[30];
+    if (!read_at(sf, e->local_offset, lh, 30) || rd32(lh) != SIG_LOCAL)
+        return ZIP_ERR_CORRUPT;
+    uint64_t data_pos = e->local_offset + 30 + rd16(lh + 26) + rd16(lh + 28);
+    if (data_pos + e->comp_size > sf->size)
+        return ZIP_ERR_CORRUPT;
+    sfile_seek(sf, data_pos);
+
+    FILE *out = fopen(out_path, "wb");
+    if (!out)
+        return ZIP_ERR_WRITE;
+    setvbuf(out, NULL, _IOFBF, 32 * 1024);
+
+    const size_t CHUNK = 16 * 1024;
+    uint8_t *in_buf = malloc(CHUNK), *out_buf = malloc(CHUNK);
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    err = (in_buf && out_buf) ? ZIP_OK : ZIP_ERR_MEMORY;
+    bool z_init = false;
+    if (err == ZIP_OK && e->method == 8)
+    {
+        if (inflateInit2(&zs, -MAX_WBITS) == Z_OK)
+            z_init = true;
+        else
+            err = ZIP_ERR_MEMORY;
+    }
+
+    uint64_t remaining = e->comp_size, written = 0;
+    uLong crc = crc32(0, Z_NULL, 0);
+    int zret = Z_OK;
+
+    while (err == ZIP_OK && remaining > 0 && zret != Z_STREAM_END)
+    {
+        size_t want = remaining < CHUNK ? (size_t)remaining : CHUNK;
+        size_t got = sfile_read(sf, in_buf, want);
+        if (got != want)
+        {
+            err = ZIP_ERR_CORRUPT;
+            break;
+        }
+        remaining -= got;
+
+        if (e->method == 0)
+        {
+            crc = crc32(crc, in_buf, (uInt)got);
+            if (fwrite(in_buf, 1, got, out) != got)
+                err = ZIP_ERR_WRITE;
+            written += got;
+        }
+        else
+        {
+            zs.next_in = in_buf;
+            zs.avail_in = (uInt)got;
+            do
+            {
+                zs.next_out = out_buf;
+                zs.avail_out = (uInt)CHUNK;
+                zret = inflate(&zs, Z_NO_FLUSH);
+                if (zret != Z_OK && zret != Z_STREAM_END && zret != Z_BUF_ERROR)
+                {
+                    err = ZIP_ERR_CORRUPT;
+                    break;
+                }
+                size_t have = CHUNK - zs.avail_out;
+                crc = crc32(crc, out_buf, (uInt)have);
+                if (fwrite(out_buf, 1, have, out) != have)
+                    err = ZIP_ERR_WRITE;
+                written += have;
+                if (written > e->uncomp_size)
+                    err = ZIP_ERR_CORRUPT;
+            } while (err == ZIP_OK && zs.avail_out == 0 && zret != Z_STREAM_END);
+        }
+
+        if (err == ZIP_OK && progress &&
+            progress(userdata, base + written, total) != 0)
+            err = ZIP_ERR_CANCELLED;
+    }
+
+    if (z_init)
+        inflateEnd(&zs);
+    free(in_buf);
+    free(out_buf);
+    if (fclose(out) != 0 && err == ZIP_OK)
+        err = ZIP_ERR_WRITE;
+
+    if (err == ZIP_OK && (written != e->uncomp_size || (uint32_t)crc != e->crc))
+        err = ZIP_ERR_CORRUPT;
+
+    if (err != ZIP_OK)
+        remove(out_path);
+    return err;
+}
+
 zip_err_t zip_extract_rom(sfile_t *sf, const char *out_path,
                           char *name_out, size_t name_size,
                           zip_progress_t progress, void *userdata)
@@ -213,102 +322,155 @@ zip_err_t zip_extract_rom(sfile_t *sf, const char *out_path,
 
     if (best_rank == 99)
         return ZIP_ERR_NO_ROM;
-    if (best.method != 0 && best.method != 8)
-        return ZIP_ERR_METHOD;
-    if (best.uncomp_size >= FAT32_MAX)
-        return ZIP_ERR_TOO_BIG;
+    return extract_entry(sf, &best, out_path, progress, userdata, 0, best.uncomp_size);
+}
 
-    // En-tête local : sa taille de champ "extra" peut différer du central
-    uint8_t lh[30];
-    if (!read_at(sf, best.local_offset, lh, 30) || rd32(lh) != SIG_LOCAL)
-        return ZIP_ERR_CORRUPT;
-    uint64_t data_pos = best.local_offset + 30 + rd16(lh + 26) + rd16(lh + 28);
-    if (data_pos + best.comp_size > sf->size)
-        return ZIP_ERR_CORRUPT;
-    sfile_seek(sf, data_pos);
+// ---------------------------------------------------------------------------
+// Extraction de toute une archive (mise à jour du système)
+// ---------------------------------------------------------------------------
 
-    FILE *out = fopen(out_path, "wb");
-    if (!out)
-        return ZIP_ERR_WRITE;
-    setvbuf(out, NULL, _IOFBF, 32 * 1024);
-
-    const size_t CHUNK = 16 * 1024;
-    uint8_t *in_buf = malloc(CHUNK), *out_buf = malloc(CHUNK);
-    z_stream zs;
-    memset(&zs, 0, sizeof(zs));
-    err = (in_buf && out_buf) ? ZIP_OK : ZIP_ERR_MEMORY;
-    bool z_init = false;
-    if (err == ZIP_OK && best.method == 8)
+// Un chemin d'archive acceptable : relatif, sans "..", sans caractère interdit
+// par FAT. Tout le reste fait refuser l'archive entière.
+static bool safe_path(const char *name)
+{
+    if (!name[0] || name[0] == '/')
+        return false;
+    for (const char *p = name; *p; p++)
+        if ((unsigned char)*p < 0x20 || strchr("\\:*?\"<>|", *p))
+            return false;
+    // Aucun élément vide, "." ou ".."
+    const char *p = name;
+    while (*p)
     {
-        if (inflateInit2(&zs, -MAX_WBITS) == Z_OK)
-            z_init = true;
-        else
-            err = ZIP_ERR_MEMORY;
+        size_t n = strcspn(p, "/");
+        if (n == 0 || (n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.'))
+            return false;
+        p += n;
+        if (*p == '/')
+            p++;
     }
+    return true;
+}
 
-    uint64_t remaining = best.comp_size, written = 0;
-    uLong crc = crc32(0, Z_NULL, 0);
-    int zret = Z_OK;
-
-    while (err == ZIP_OK && remaining > 0 && zret != Z_STREAM_END)
+// Crée les dossiers parents de path (à partir de l'octet `from`)
+static void make_parents(char *path, size_t from)
+{
+    for (char *p = path + from; *p; p++)
     {
-        size_t want = remaining < CHUNK ? (size_t)remaining : CHUNK;
-        size_t got = sfile_read(sf, in_buf, want);
-        if (got != want)
+        if (*p == '/')
         {
-            err = ZIP_ERR_CORRUPT;
-            break;
+            *p = '\0';
+            mkdir(path, 0777);
+            *p = '/';
         }
-        remaining -= got;
-
-        if (best.method == 0)
-        {
-            crc = crc32(crc, in_buf, (uInt)got);
-            if (fwrite(in_buf, 1, got, out) != got)
-                err = ZIP_ERR_WRITE;
-            written += got;
-        }
-        else
-        {
-            zs.next_in = in_buf;
-            zs.avail_in = (uInt)got;
-            do
-            {
-                zs.next_out = out_buf;
-                zs.avail_out = (uInt)CHUNK;
-                zret = inflate(&zs, Z_NO_FLUSH);
-                if (zret != Z_OK && zret != Z_STREAM_END && zret != Z_BUF_ERROR)
-                {
-                    err = ZIP_ERR_CORRUPT;
-                    break;
-                }
-                size_t have = CHUNK - zs.avail_out;
-                crc = crc32(crc, out_buf, (uInt)have);
-                if (fwrite(out_buf, 1, have, out) != have)
-                    err = ZIP_ERR_WRITE;
-                written += have;
-                if (written > best.uncomp_size)
-                    err = ZIP_ERR_CORRUPT;
-            } while (err == ZIP_OK && zs.avail_out == 0 && zret != Z_STREAM_END);
-        }
-
-        if (err == ZIP_OK && progress &&
-            progress(userdata, written, best.uncomp_size) != 0)
-            err = ZIP_ERR_CANCELLED;
     }
+}
 
-    if (z_init)
-        inflateEnd(&zs);
-    free(in_buf);
-    free(out_buf);
-    if (fclose(out) != 0 && err == ZIP_OK)
-        err = ZIP_ERR_WRITE;
+// Lit l'entrée suivante du répertoire central. Renvoie false à la fin (ou si
+// le répertoire est abîmé : *bad est alors mis à true).
+static bool next_entry(const uint8_t *cd, uint64_t cd_size, size_t *off, entry_t *e,
+                       char *name, size_t name_size, bool *bad)
+{
+    if (*off + 46 > cd_size || rd32(cd + *off) != SIG_CENTRAL)
+    {
+        *bad = *off != cd_size;
+        return false;
+    }
+    const uint8_t *h = cd + *off;
+    uint16_t nlen = rd16(h + 28), xlen = rd16(h + 30), clen = rd16(h + 32);
+    if (*off + 46 + nlen + xlen + clen > cd_size || nlen >= name_size)
+    {
+        *bad = true;
+        return false;
+    }
+    memcpy(name, h + 46, nlen);
+    name[nlen] = '\0';
 
-    if (err == ZIP_OK && (written != best.uncomp_size || (uint32_t)crc != best.crc))
-        err = ZIP_ERR_CORRUPT;
+    e->method = rd16(h + 10);
+    e->crc = rd32(h + 16);
+    e->comp_size = rd32(h + 20);
+    e->uncomp_size = rd32(h + 24);
+    e->local_offset = rd32(h + 42);
+    apply_zip64_extra(e, h + 46 + nlen, xlen, e->uncomp_size == 0xFFFFFFFF,
+                      e->comp_size == 0xFFFFFFFF, e->local_offset == 0xFFFFFFFF);
+    *off += 46 + nlen + xlen + clen;
+    return true;
+}
 
+zip_err_t zip_extract_all(sfile_t *sf, const char *dest_dir,
+                          zip_progress_t progress, void *userdata)
+{
+    uint64_t cd_offset, cd_size, entries;
+    zip_err_t err = find_central_dir(sf, &cd_offset, &cd_size, &entries);
     if (err != ZIP_OK)
-        remove(out_path);
+        return err;
+    if (cd_size > MAX_CD_SIZE)
+        return ZIP_ERR_MEMORY;
+
+    uint8_t *cd = malloc(cd_size ? (size_t)cd_size : 1);
+    if (!cd)
+        return ZIP_ERR_MEMORY;
+    if (!read_at(sf, cd_offset, cd, (size_t)cd_size))
+    {
+        free(cd);
+        return ZIP_ERR_CORRUPT;
+    }
+
+    char name[ZIP_PATH_MAX], path[ZIP_PATH_MAX + 256], tmp[ZIP_PATH_MAX + 264];
+    size_t root_len = strlen(dest_dir) + 1;
+    entry_t e;
+    bool bad = false, method_bad = false;
+
+    // 1re passe : on vérifie tous les chemins avant d'écrire quoi que ce soit
+    uint64_t total = 0, count = 0;
+    size_t off = 0;
+    while (next_entry(cd, cd_size, &off, &e, name, sizeof(name), &bad))
+    {
+        if (e.method != 0 && e.method != 8)
+            method_bad = true;
+        if (!safe_path(name))
+            bad = true;
+        if (bad || method_bad)
+            break;
+        total += e.uncomp_size;
+        count++;
+    }
+    if (bad || method_bad || count != entries || strlen(dest_dir) >= 250)
+    {
+        free(cd);
+        return method_bad && !bad ? ZIP_ERR_METHOD : ZIP_ERR_FORMAT;
+    }
+
+    // 2e passe : chaque fichier est écrit à côté de sa destination puis la
+    // remplace, pour qu'une coupure ne laisse jamais un fichier à moitié écrit
+    uint64_t done = 0;
+    off = 0;
+    while (err == ZIP_OK && next_entry(cd, cd_size, &off, &e, name, sizeof(name), &bad))
+    {
+        snprintf(path, sizeof(path), "%s/%s", dest_dir, name);
+        make_parents(path, root_len);
+
+        size_t n = strlen(path);
+        if (path[n - 1] == '/')
+        {
+            path[n - 1] = '\0';
+            mkdir(path, 0777);
+            continue;
+        }
+
+        snprintf(tmp, sizeof(tmp), "%s.dsitmp", path);
+        err = extract_entry(sf, &e, tmp, progress, userdata, done, total);
+        if (err != ZIP_OK)
+            break;
+        remove(path);
+        if (rename(tmp, path) != 0)
+        {
+            remove(tmp);
+            err = ZIP_ERR_WRITE;
+        }
+        done += e.uncomp_size;
+    }
+    free(cd);
     return err;
 }
 

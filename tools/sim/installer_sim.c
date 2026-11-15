@@ -26,6 +26,12 @@ static int nupd;
 static game_t list[GAMES_MAX];
 
 void installer_sim_tick(void);
+static void twl_sim_tick(void);
+
+// Mise à jour de TWiLight Menu++ (simulée plus bas)
+static twl_state_t twl_st = TWL_IDLE;
+static int twl_timer;
+static char twl_have[64] = "v27.24.0";
 
 bool installer_init(void) { return true; }
 bool installer_storage_ok(void) { return true; }
@@ -82,6 +88,11 @@ bool installer_update(const char *file, bool from_remote)
 
 void installer_cancel(void)
 {
+    if (twl_st == TWL_UPDATING)
+    {
+        twl_st = TWL_READY;   // Annulée : on pourra la reprendre
+        return;
+    }
     state = INST_ERROR;
     snprintf(msg, sizeof(msg), "Installation annulée");
 }
@@ -135,6 +146,7 @@ static void write_rom(const char *file, const char *content)
 
 void installer_sim_tick(void)
 {
+    twl_sim_tick();
     if (checking)
     {
         check_timer++;
@@ -285,4 +297,57 @@ const browse_repo_t *installer_browse_get(int index)
     if (index < 0 || index >= installer_browse_count())
         return NULL;
     return &browse_fake[index];
+}
+
+// ---------------------------------------------------------------------------
+// Mise à jour de TWiLight Menu++ : simulée (9 paquets, sans réseau)
+// ---------------------------------------------------------------------------
+
+#define TWL_SIM_PACKS 9
+#define TWL_SIM_TOTAL (76ull * 1024 * 1024)
+
+
+bool installer_twl_present(void) { return true; }
+
+bool installer_twl_check(void)
+{
+    twl_st = TWL_CHECKING;
+    twl_timer = 0;
+    return true;
+}
+
+bool installer_twl_update(void)
+{
+    if (twl_st != TWL_READY)
+        return false;
+    twl_st = TWL_UPDATING;
+    twl_timer = 0;
+    return true;
+}
+
+twl_state_t installer_twl_state(void) { return twl_st; }
+const char *installer_twl_message(void) { return ""; }
+const char *installer_twl_installed(void) { return twl_have; }
+const char *installer_twl_latest(void) { return twl_st == TWL_IDLE || twl_st == TWL_CHECKING ? "" : "v27.25.1"; }
+int installer_twl_resume(void) { return 0; }
+
+void installer_twl_progress(int *pack, int *packs, uint64_t *done, uint64_t *all)
+{
+    *packs = TWL_SIM_PACKS;
+    *pack = twl_timer * TWL_SIM_PACKS / 180 + 1;
+    if (*pack > TWL_SIM_PACKS)
+        *pack = TWL_SIM_PACKS;
+    *done = TWL_SIM_TOTAL * (uint64_t)twl_timer / 180;
+    *all = TWL_SIM_TOTAL;
+}
+
+static void twl_sim_tick(void)
+{
+    if (twl_st == TWL_CHECKING && ++twl_timer >= 20)
+        twl_st = TWL_READY;
+    else if (twl_st == TWL_UPDATING && ++twl_timer >= 180)
+    {
+        twl_st = TWL_DONE;
+        snprintf(twl_have, sizeof(twl_have), "v27.25.1");
+    }
 }

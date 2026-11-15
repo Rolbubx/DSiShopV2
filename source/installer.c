@@ -18,6 +18,7 @@
 #include "games.h"
 #include "installer.h"
 #include "splitfile.h"
+#include "sysupdate.h"
 #include "zip.h"
 
 #define USER_AGENT "DSiShop/0.2 (Nintendo DSi; +https://github.com)"
@@ -99,6 +100,20 @@ static bool browse_is_search;
 static char browse_msg[160];
 static browse_repo_t browse_list[BROWSE_MAX];
 static int browse_count;
+
+// Mise à jour de TWiLight Menu++
+static struct {
+    volatile twl_state_t state;
+    char msg[192];
+    char installed[64];
+    sysupd_manifest_t man;
+    int resume;
+    volatile int pack;          // Paquet en cours (index)
+    sysupd_phase_t phase;
+    uint64_t pack_done;         // Octets extraits du paquet en cours
+    uint64_t done_before;       // Octets des paquets déjà traités
+    uint64_t total;             // Téléchargement + extraction, tous paquets
+} twl;
 
 // ---------------------------------------------------------------------------
 // Utilitaires
@@ -1104,7 +1119,7 @@ static bool can_start(void)
     if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
         return false;
     if (inst.checking || browse_state == BROWSE_LOADING || !inst.storage_ok ||
-        !inst.curl_ok)
+        !inst.curl_ok || twl.state == TWL_CHECKING || twl.state == TWL_UPDATING)
         return false;
     return free_thread_slot();
 }
@@ -1430,6 +1445,211 @@ int installer_browse_count(void) { return browse_count; }
 const browse_repo_t *installer_browse_get(int index)
 {
     return (index >= 0 && index < browse_count) ? &browse_list[index] : NULL;
+}
+
+// ---------------------------------------------------------------------------
+// Mise à jour de TWiLight Menu++
+// ---------------------------------------------------------------------------
+
+// Ce que pèse un paquet dans la barre de progression : téléchargé puis extrait
+static uint64_t twl_weight(const sysupd_pack_t *p)
+{
+    return (uint64_t)p->size + p->unc_size;
+}
+
+static bool twl_applies(const sysupd_pack_t *p)
+{
+    char path[200];
+    if (!p->cond[0])
+        return true;
+    snprintf(path, sizeof(path), "%s/%s", inst.root, p->cond);
+    return file_exists(path);
+}
+
+static int twl_fetch(void *ud, const char *path, const char *dest_base, char *err,
+                     size_t err_size)
+{
+    (void)ud;
+    char url[256];
+    snprintf(url, sizeof(url), CATALOG_URL "%s", path);
+
+    sfile_t sf;
+    if (!sfile_open_write(&sf, dest_base, SPLIT_CHUNK_DEFAULT))
+    {
+        snprintf(err, err_size, "Impossible d'écrire sur la carte SD");
+        return -1;
+    }
+    int ret = http_req(url, false, &sf, NULL, err, err_size);
+    if (!sfile_close(&sf) && ret == 0)
+    {
+        snprintf(err, err_size, "Impossible d'écrire sur la carte SD (pleine ?)");
+        ret = -1;
+    }
+    if (ret != 0 && inst.cancel && !inst.no_space)
+        snprintf(err, err_size, "Mise à jour annulée");
+    return ret;
+}
+
+static int twl_progress(void *ud, int pack, sysupd_phase_t phase, uint64_t done,
+                        uint64_t total)
+{
+    (void)ud; (void)total;
+    if (pack != twl.pack)
+    {
+        // Les paquets précédents (appliqués ou sautés) sont derrière nous
+        uint64_t before = 0;
+        for (int i = twl.resume; i < pack; i++)
+            if (twl_applies(&twl.man.packs[i]))
+                before += twl_weight(&twl.man.packs[i]);
+        twl.done_before = before;
+        twl.pack = pack;
+    }
+    twl.phase = phase;
+    twl.pack_done = phase == SYSUPD_EXTRACT ? done : 0;
+    if (phase == SYSUPD_DOWNLOAD)
+        inst.now = 0;   // Le téléchargement de ce paquet n'a pas commencé
+    cothread_yield();
+    return inst.cancel ? 1 : 0;
+}
+
+static int twl_check_thread(void *arg)
+{
+    (void)arg;
+    char err[192];
+
+    twl.installed[0] = '\0';
+    sysupd_installed_version(inst.root, twl.installed, sizeof(twl.installed));
+
+    membuf_t mem = { .data = malloc(BROWSE_JSON_MAX), .len = 0, .cap = BROWSE_JSON_MAX };
+    if (!mem.data)
+    {
+        snprintf(twl.msg, sizeof(twl.msg), "Mémoire insuffisante");
+        twl.state = TWL_ERROR;
+        return 0;
+    }
+    mem.data[0] = '\0';
+
+    if (http_req(CATALOG_URL "/twilight/manifest", false, NULL, &mem, err, sizeof(err)) != 0)
+    {
+        if (strstr(err, "HTTP 503"))
+            snprintf(twl.msg, sizeof(twl.msg),
+                     "Le serveur prépare la mise à jour : réessaie dans une minute");
+        else
+            snprintf(twl.msg, sizeof(twl.msg), "%.191s", err);
+        twl.state = TWL_ERROR;
+    }
+    else if (!sysupd_parse_manifest(mem.data, &twl.man))
+    {
+        snprintf(twl.msg, sizeof(twl.msg), "Réponse du serveur incompréhensible");
+        twl.state = TWL_ERROR;
+    }
+    else
+    {
+        twl.resume = sysupd_resume_index(inst.root, twl.man.tag);
+        if (twl.resume >= twl.man.count)
+            twl.resume = 0;
+        twl.state = TWL_READY;
+    }
+    free(mem.data);
+    return 0;
+}
+
+static int twl_update_thread(void *arg)
+{
+    (void)arg;
+    char err[192] = "";
+
+    uint64_t avail;
+    if (free_space(&avail) && avail < twl.man.need)
+    {
+        char need[24], have[24];
+        format_size(need, sizeof(need), twl.man.need);
+        format_size(have, sizeof(have), avail);
+        snprintf(twl.msg, sizeof(twl.msg),
+                 "Pas assez de place sur la carte SD : il faut %s, il reste %s", need, have);
+        twl.state = TWL_ERROR;
+        return 0;
+    }
+
+    sysupd_io_t io = { twl_fetch, twl_progress, NULL };
+    if (sysupd_apply(inst.root, &twl.man, &io, err, sizeof(err)) != 0)
+    {
+        snprintf(twl.msg, sizeof(twl.msg), "%.191s", err);
+        twl.resume = sysupd_resume_index(inst.root, twl.man.tag);
+        twl.state = TWL_ERROR;
+        return 0;
+    }
+    twl.resume = 0;
+    snprintf(twl.installed, sizeof(twl.installed), "%s", twl.man.tag);
+    twl.state = TWL_DONE;
+    return 0;
+}
+
+static bool twl_launch(int (*fn)(void *), twl_state_t state)
+{
+    if (!can_start())
+        return false;
+    twl.msg[0] = '\0';
+    inst.cancel = false;
+    twl.state = state;
+    inst.thread = cothread_create(fn, NULL, 128 * 1024, 0);
+    if (inst.thread < 0)
+    {
+        twl.state = TWL_ERROR;
+        snprintf(twl.msg, sizeof(twl.msg), "Impossible de créer la tâche");
+        return false;
+    }
+    inst.thread_alive = true;
+    return true;
+}
+
+bool installer_twl_present(void)
+{
+    // Les paquets viennent de la version "DSi" : carte SD de la console seulement
+    return inst.storage_ok && strcmp(inst.root, "sd:") == 0 && sysupd_present(inst.root);
+}
+
+bool installer_twl_check(void)
+{
+    return twl_launch(twl_check_thread, TWL_CHECKING);
+}
+
+bool installer_twl_update(void)
+{
+    if ((twl.state != TWL_READY && twl.state != TWL_ERROR) || twl.man.count == 0 ||
+        !installer_twl_present())
+        return false;
+
+    twl.total = 0;
+    for (int i = twl.resume; i < twl.man.count; i++)
+        if (twl_applies(&twl.man.packs[i]))
+            twl.total += twl_weight(&twl.man.packs[i]);
+    twl.pack = twl.resume;
+    twl.phase = SYSUPD_DOWNLOAD;
+    twl.pack_done = 0;
+    twl.done_before = 0;
+    return twl_launch(twl_update_thread, TWL_UPDATING);
+}
+
+twl_state_t installer_twl_state(void) { return twl.state; }
+const char *installer_twl_message(void) { return twl.msg; }
+const char *installer_twl_installed(void) { return twl.installed; }
+const char *installer_twl_latest(void) { return twl.man.tag; }
+int installer_twl_resume(void) { return twl.resume; }
+
+void installer_twl_progress(int *pack, int *packs, uint64_t *now, uint64_t *total)
+{
+    const sysupd_pack_t *p = &twl.man.packs[twl.pack];
+    uint64_t cur;
+    if (twl.phase == SYSUPD_DOWNLOAD)
+        cur = inst.now < p->size ? inst.now : p->size;
+    else
+        cur = p->size + twl.pack_done;
+
+    *pack = twl.pack + 1;
+    *packs = twl.man.count;
+    *now = twl.done_before + cur;
+    *total = twl.total;
 }
 
 upd_status_t installer_update_status(const char *file, const char **latest)

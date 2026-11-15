@@ -14,3 +14,4 @@ tools/test/lremote_pc
 # Serveur de catalogue
 catalog.json
 __pycache__/
+tools/test/test_sysupdate
