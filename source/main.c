@@ -126,6 +126,8 @@ int main(int argc, char **argv)
     // Carte SD (pour installer les jeux) puis Wi-Fi
     boot_step(1, 4, "carte SD...");
     installer_init();
+    // Revenu d'un jeu lancé depuis DSi Shop : on remet le réglage de TWiLight d'avant
+    installer_launch_restore();
     // Notre propre chemin : sert à se lancer tout seul au démarrage
     installer_set_self_path(argc > 0 && argv ? argv[0] : NULL);
     boot_step(2, 4, skip_wifi ? "Wi-Fi désactivé (B)" : "Wi-Fi...");

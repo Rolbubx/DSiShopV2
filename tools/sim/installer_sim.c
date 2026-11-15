@@ -451,3 +451,12 @@ static void self_sim_tick(void)
             self_st = SELF_DONE;
     }
 }
+
+// Lancer un jeu (simulé : TWiLight Menu++ n'existe pas ici)
+const char *installer_launch_game(const char *dir, const char *file) { (void)dir; (void)file; return NULL; }
+void installer_launch_restore(void) {}
+const char *installer_rom_kind_text(const char *dir, const char *file)
+{
+    (void)dir;
+    return strstr(file, "Doom") ? "homebrew (lancement direct)" : "jeu DS (nds-bootstrap)";
+}

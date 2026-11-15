@@ -172,6 +172,11 @@ int main(int argc, char **argv)
     tap(128, 68);
     frames(3);
     save(dir, "01c_fiche_jeu_sd");
+    tap(71, 56);               // Lancer
+    frames(40);
+    save(dir, "01d_lancement");
+    tap(128, 125);             // Annuler pendant le compte à rebours
+    frames(3);
     press(BTN_B);              // Fiche -> liste
     frames(3);
     press(BTN_B);              // Liste -> accueil

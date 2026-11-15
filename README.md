@@ -278,6 +278,31 @@ rangé hors du dossier de DSi Shop, il n'y a pas de mise à jour automatique (on
 il vient) et « Désinstaller » devient « Supprimer le jeu » ; aucun fichier de registre n'est
 créé dans ses dossiers. L'onglet « Mes jeux » reste la liste des jeux installés par DSi Shop.
 
+## Lancer un jeu
+
+Dans la fiche d'un jeu (Mes jeux ou Toute la SD), **Lancer** démarre le jeu *via TWiLight
+Menu++*. Une application BlocksDS ne peut pas en démarrer une autre directement ; DSi Shop
+utilise donc le réglage « lancer la dernière ROM » de TWiLight (`AUTORUNGAME` dans
+`_nds/TWiLightMenu/settings.ini`, le même que « Au démarrage ») : il note le jeu comme
+dernière ROM lancée, puis redémarre la console (compte à rebours de 3 s, annulable). TWiLight
+démarre alors le jeu tout seul.
+
+TWiLight lance les jeux de façons différentes selon leur type, qu'il reconnaît à l'en-tête de
+la ROM. DSi Shop reprend ses règles (voir `twlini_classify_rom`) :
+
+| Type reconnu | Réglages écrits |
+|---|---|
+| Jeu DS du commerce (code ARM9 du SDK Nintendo) | `LAUNCH_TYPE = 1`, `HOMEBREW_BOOTSTRAP = 0` (nds-bootstrap) |
+| Homebrew moderne (lit la SD seul, comme DSi Shop) | `LAUNCH_TYPE = 2`, `HOMEBREW_BOOTSTRAP = 1` (lancement direct) |
+| Homebrew ancien (pilote DLDI) | `LAUNCH_TYPE = 1`, `HOMEBREW_BOOTSTRAP = 1` (nds-bootstrap hb) |
+| DSiWare | refusé : à lancer depuis TWiLight Menu++ |
+
+Les autres réglages de TWiLight ne sont pas touchés. L'ancienne valeur de `AUTORUNGAME` est
+notée dans `_dsishop/prev_autorun` et **remise au prochain démarrage de DSi Shop** (ou si on
+annule le compte à rebours). Tant que DSi Shop n'a pas été rouvert, TWiLight relancera ce jeu
+à chaque démarrage : maintenir **B** ouvre son menu. Seulement sur la carte SD de la console
+(chemins `sd:/…`), avec TWiLight Menu++ installé.
+
 ## Pré-description et mode Verbose
 
 Avant de télécharger, une installation lancée depuis la console s'arrête sur une

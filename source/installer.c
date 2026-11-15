@@ -1262,6 +1262,42 @@ bool installer_init(void)
     return inst.storage_ok;
 }
 
+const char *installer_launch_game(const char *dir, const char *file)
+{
+    if (!installer_twl_present())
+        return "TWiLight Menu++ est introuvable sur la carte SD";
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    switch (twlini_launch_set(inst.root, path, NULL))
+    {
+        case LAUNCH_OK:      return NULL;
+        case LAUNCH_NOT_SD:  return "Ce jeu n'est pas sur la carte SD de la console";
+        case LAUNCH_BAD_ROM: return "ROM illisible ou en-tête invalide";
+        case LAUNCH_DSIWARE: return "DSiWare : à lancer depuis TWiLight Menu++";
+        default:             return "Réglages de TWiLight Menu++ non modifiables";
+    }
+}
+
+void installer_launch_restore(void)
+{
+    if (inst.storage_ok && strcmp(inst.root, "sd:") == 0)
+        twlini_launch_restore(inst.root);
+}
+
+const char *installer_rom_kind_text(const char *dir, const char *file)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    switch (twlini_classify_rom(path))
+    {
+        case ROM_COMMERCIAL:      return "jeu DS (nds-bootstrap)";
+        case ROM_HOMEBREW_MODERN: return "homebrew (lancement direct)";
+        case ROM_HOMEBREW_OLD:    return "homebrew (nds-bootstrap)";
+        case ROM_DSIWARE:         return "DSiWare (pas lançable d'ici)";
+        default:                  return "ROM illisible";
+    }
+}
+
 const install_info_t *installer_preview_info(void)
 {
     return &inst.info;

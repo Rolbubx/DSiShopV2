@@ -41,6 +41,7 @@ typedef enum {
     SCREEN_BROWSE,        // Liste des projets de cet utilisateur
     SCREEN_TWL,           // Mise à jour de TWiLight Menu++
     SCREEN_SETTINGS,      // Réglages : thème, Verbose, démarrage
+    SCREEN_LAUNCH,        // Lancement d'un jeu : compte à rebours avant le redémarrage
 } app_screen_t;
 
 // Actions qui demandent une confirmation
@@ -58,6 +59,9 @@ enum { BMODE_SEARCH, BMODE_USER };
 
 // Onglets de l'écran "Installer un jeu" / "Gérer les jeux"
 enum { TAB_INSTALL, TAB_GAMES, TAB_SD };
+
+// Délai avant le redémarrage qui lance le jeu (laisse le temps d'annuler)
+#define LAUNCH_DELAY_FRAMES (3 * 60)
 
 // Taille max d'un QR code (version 10 : URL jusqu'à ~170 caractères)
 #define QR_MAX_VERSION 10
@@ -102,6 +106,8 @@ static struct {
     bool sd_dirty;        // La carte a changé : à ré-analyser en revenant sur l'onglet
     int sd_scroll;
     char sel_dir[SDSCAN_PATH];  // Dossier du jeu affiché dans la fiche
+    char sel_kind[48];          // Type reconnu (jeu DS, homebrew...)
+    unsigned int launch_frame;  // Image où le lancement a été demandé
     bool sel_from_sd;           // La fiche vient de l'onglet "Toute la SD"
     game_t sel;           // Jeu affiché dans la fiche
     int sel_saves;        // Nombre de fichiers de sauvegarde trouvés
@@ -683,6 +689,10 @@ static void draw_top(canvas_t *c)
             }
 
             y += 2;
+            snprintf(line, sizeof(line), "Type : %s", app.sel_kind);
+            if (y + font_small.height <= bottom)
+                gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+            y += font_small.height + 2;
             snprintf(line, sizeof(line), "Sauvegardes : %d fichier(s)%s", app.sel_saves,
                      app.sel_saves ? " (gardées pendant les mises à jour)" : "");
             if (y + font_small.height <= bottom)
@@ -692,6 +702,27 @@ static void draw_top(canvas_t *c)
                      app.sel_backup ? "disponible" : "aucune");
             if (y + font_small.height <= bottom)
                 gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+            break;
+        }
+
+        case SCREEN_LAUNCH:
+        {
+            gfx_text(c, &font_title, 12, 30, "Lancement du jeu", COL_TEXT);
+            rect_t r = RECT(8, 54, SCREEN_W - 16, SCREEN_H - 62);
+            ui_panel(c, r);
+            int x = r.x + 8, w = r.w - 16, y = r.y + 6;
+            gfx_text_box(c, &font_body, x, y, w, ALIGN_LEFT, app.sel.file, COL_TEXT);
+            y += font_body.height + 3;
+            char line[200];
+            snprintf(line, sizeof(line), "Type : %s", app.sel_kind);
+            gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+            y += font_small.height + 8;
+            gfx_text_wrap(c, &font_small, x, y, w, r.y + r.h - 4 - y,
+                          "La console redémarre et TWiLight Menu++ lance ce jeu.\n"
+                          "\n"
+                          "Pour revenir au menu de TWiLight au prochain démarrage, "
+                          "maintiens B. DSi Shop remettra alors ses réglages d'avant.",
+                          COL_TEXT_DIM);
             break;
         }
 
@@ -1201,6 +1232,8 @@ static uint32_t top_signature(void)
     MIX((unsigned char)installer_message()[0]);
     if (app.screen == SCREEN_INSTALL_DONE)
         MIX(reboot_seconds_left());
+    if (app.screen == SCREEN_LAUNCH)
+        MIX((LAUNCH_DELAY_FRAMES - (int)(app.frame - app.launch_frame)) / 60);
     MIX(time(NULL) / 60);
     MIX(lremote_enabled());
     MIX(lremote_net_running());
@@ -1897,6 +1930,7 @@ static void open_game(const game_t *g)
     snprintf(app.sel_dir, sizeof(app.sel_dir), "%s", installer_dir());
     app.sel_saves = games_find_saves(app.sel_dir, g->file, NULL, 0);
     app.sel_backup = games_has_backup(app.sel_dir, g->file);
+    snprintf(app.sel_kind, sizeof(app.sel_kind), "%s", installer_rom_kind_text(app.sel_dir, g->file));
     go(SCREEN_GAME);
 }
 
@@ -1915,6 +1949,7 @@ static void open_sd_game(const sdgame_t *sg)
     snprintf(app.sel_dir, sizeof(app.sel_dir), "%s", dir);
     app.sel_saves = games_find_saves(app.sel_dir, g.file, NULL, 0);
     app.sel_backup = games_has_backup(app.sel_dir, g.file);
+    snprintf(app.sel_kind, sizeof(app.sel_kind), "%s", installer_rom_kind_text(app.sel_dir, g.file));
     go(SCREEN_GAME);
 }
 
@@ -2328,7 +2363,21 @@ static void screen_game(canvas_t *c, const input_t *in)
     const int x = BTN_X0, w = BTN_W, h = 24, gap = 4;
     int y = 44;
 
-    if (ui_button(c, RECT(x, y, w, h), "Mettre à jour", BTN_STYLE_PRIMARY,
+    const int half = (w - gap) / 2;
+    if (ui_button(c, RECT(x, y, half, h), "Lancer", BTN_STYLE_PRIMARY,
+                  installer_twl_present() && !busy))
+    {
+        const char *err = installer_launch_game(app.sel_dir, g->file);
+        if (err)
+            ui_toast(err);
+        else
+        {
+            app.launch_frame = app.frame;
+            go(SCREEN_LAUNCH);
+        }
+        return;
+    }
+    if (ui_button(c, RECT(x + half + gap, y, half, h), "Mettre à jour", BTN_STYLE_NORMAL,
                   tracked && in_shop_dir && online && !busy))
     {
         if (!installer_update(g->file, false))
@@ -2369,6 +2418,28 @@ static void screen_game(canvas_t *c, const input_t *in)
     if (ui_button(c, RECT(x, y, w, h), "Retour", BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
         back_to_games();
+}
+
+// Compte à rebours avant le redémarrage qui lance le jeu : on peut encore annuler
+static void screen_launch(canvas_t *c, const input_t *in)
+{
+    ui_header(c, "Lancement", NULL);
+
+    int left = LAUNCH_DELAY_FRAMES - (int)(app.frame - app.launch_frame);
+    ui_spinner(c, SCREEN_W / 2, 56, 8, app.frame, COL_ACCENT);
+    char line[96];
+    snprintf(line, sizeof(line), "Redémarrage dans %d s…", left > 0 ? (left + 59) / 60 : 0);
+    gfx_text_box(c, &font_body, 8, 74, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+
+    if (ui_button(c, RECT(BTN_X0, 110, BTN_W, BTN_H), "Annuler", BTN_STYLE_DANGER, left > 0) ||
+        ((in->down & BTN_B) && left > 0))
+    {
+        installer_launch_restore();   // Remet le réglage de TWiLight d'avant
+        go(SCREEN_GAME);
+        return;
+    }
+    if (left <= 0)
+        app.reboot = true;
 }
 
 static void screen_confirm(canvas_t *c, const input_t *in)
@@ -2957,7 +3028,7 @@ void app_frame(const input_t *in)
                          app.screen == SCREEN_BROWSE_USER ||
                          (app.screen == SCREEN_BROWSE &&
                           installer_browse_state() == BROWSE_LOADING) ||
-                         app.screen == SCREEN_INSTALL_DONE ||
+                         app.screen == SCREEN_INSTALL_DONE || app.screen == SCREEN_LAUNCH ||
                          (app.screen == SCREEN_INSTALL && install_busy()) ||
                          (app.screen == SCREEN_TWL && twl_busy()) ||
                          (app.screen == SCREEN_INSTALL && app.install_tab == TAB_SD &&
@@ -2993,6 +3064,7 @@ void app_frame(const input_t *in)
             case SCREEN_BROWSE:   screen_browse(c, in); break;
             case SCREEN_TWL:      screen_twl(c, in); break;
             case SCREEN_SETTINGS: screen_settings(c, in); break;
+            case SCREEN_LAUNCH:   screen_launch(c, in); break;
         }
 
         ui_draw_toast(c);

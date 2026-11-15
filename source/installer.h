@@ -201,6 +201,19 @@ const char *installer_log_get(int index);
 // Débit du téléchargement en cours, en octets par seconde (0 : pas encore connu)
 uint64_t installer_speed(void);
 
+// ---------------------------------------------------------------------------
+// Lancer un jeu (via TWiLight Menu++, voir twlini.h)
+// ---------------------------------------------------------------------------
+
+// Règle TWiLight Menu++ pour qu'il lance ce jeu au prochain démarrage. Renvoie
+// NULL si c'est fait (il reste à redémarrer la console), sinon un message d'erreur.
+const char *installer_launch_game(const char *dir, const char *file);
+// Remet le réglage "lancer la dernière ROM" d'avant un lancement (au démarrage de
+// DSi Shop, ou si on annule)
+void installer_launch_restore(void);
+// Type du jeu reconnu à son en-tête ("Jeu DS", "Homebrew"...), pour la fiche
+const char *installer_rom_kind_text(const char *dir, const char *file);
+
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);
 // Espace libre sur la carte SD en octets (0 si inconnu)
