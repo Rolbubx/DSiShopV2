@@ -17,3 +17,4 @@ __pycache__/
 tools/test/test_sysupdate
 tools/test/test_twlini
 udb.json
+catalog-server/*.prev

@@ -65,6 +65,8 @@ jobs:
         run: python3 catalog-server/test_twilight.py
       - name: Serveur du catalogue (source Universal-DB)
         run: python3 catalog-server/test_udb.py
+      - name: Serveur du catalogue (mise à jour automatique)
+        run: python3 catalog-server/test_autoupdate.py
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots

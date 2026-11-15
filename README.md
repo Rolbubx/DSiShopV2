@@ -197,6 +197,28 @@ mêmes lignes « auteur / projet / étoiles / version / description » et instal
 release GitHub du projet. La liste est gardée dans `udb.json` (`UDB_FILE`) pour repartir
 tout de suite après un redémarrage. Tests : `python3 catalog-server/test_udb.py`.
 
+### Mise à jour automatique du serveur
+
+Avec `AUTO_UPDATE=1`, le serveur compare `catalog.py` avec la copie GitHub toutes les
+10 secondes (`UPDATE_EVERY`), par une requête conditionnelle (ETag) qui ne coûte presque
+rien. Quand le fichier a changé :
+
+1. le nouveau fichier est vérifié : il doit se charger sans erreur, sinon il est ignoré
+   (et pas réessayé tant qu'il ne change pas) ;
+2. les **nouveaux téléchargements sont mis en pause** (réponse 503, la console réessaie) ;
+   la recherche, `/health` et le manifeste continuent de répondre ;
+3. les téléchargements déjà en cours **vont jusqu'au bout** (30 minutes au plus,
+   `UPDATE_DRAIN_MAX`) ;
+4. l'ancien fichier est gardé dans `catalog.py.prev`, le nouveau le remplace, et le
+   serveur se relance tout seul (même processus, mêmes réglages).
+
+La branche suivie est `UPDATE_BRANCH` (par défaut celle de développement ; mets `main`
+une fois la fusion faite). GitHub met ses fichiers en cache environ 5 minutes : compte
+donc quelques minutes entre un push et la bascule. `/health` affiche en dernier champ
+les 8 premiers caractères de l'empreinte du fichier qui tourne. Quiconque peut pousser
+sur la branche suivie peut donc modifier le code du serveur : garde-la pour toi.
+Tests : `python3 catalog-server/test_autoupdate.py`.
+
 ## Mettre à jour TWiLight Menu++
 
 Menu **Plus → Mettre à jour TWiLight Menu++** : l'appli compare la version installée

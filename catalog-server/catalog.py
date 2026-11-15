@@ -29,6 +29,17 @@ Run behind a reverse proxy (Caddy) that does the HTTPS. Optional environment:
     PORT           listen port on 127.0.0.1 (default: 8081)
     TWILIGHT_DIR   where the TWiLight Menu++ packets are kept (default: twilight)
     UDB_FILE       cache of the Universal-DB list (default: udb.json)
+
+Automatic updates (off unless AUTO_UPDATE=1): every UPDATE_EVERY seconds
+(default 10) the server compares catalog.py with the copy on GitHub. When it
+changed, new file downloads are paused (answer 503, the console just retries),
+the downloads already running are allowed to finish (UPDATE_DRAIN_MAX seconds
+at most, default 1800), then catalog.py is replaced (the old one is kept in
+catalog.py.prev) and the server restarts itself. A new file that does not
+load is never applied.
+    AUTO_UPDATE=1        turn it on
+    UPDATE_BRANCH        branch to follow (default: claude/gallant-turing-94jcs7)
+    UPDATE_URL           full address of the file (default: raw.githubusercontent.com)
 """
 import hashlib
 import json
@@ -36,6 +47,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -640,6 +652,11 @@ def twl_refresh():
 
 def twl_load():
     """At startup: serve the packets built by a previous run straight away."""
+    # A restart in the middle of a build leaves its temporary folder behind
+    if os.path.isdir(TWILIGHT_DIR):
+        for d in os.listdir(TWILIGHT_DIR):
+            if d.startswith("build-"):
+                shutil.rmtree(os.path.join(TWILIGHT_DIR, d), ignore_errors=True)
     try:
         with open(os.path.join(TWILIGHT_DIR, "current"), encoding="utf-8") as f:
             tag = f.read().strip()
@@ -661,6 +678,140 @@ def twl_manifest():
     if due:
         threading.Thread(target=twl_refresh, daemon=True).start()
     return (manifest or None), error
+
+
+# ---------------------------------------------------------------------------
+# Automatic update of this very file, without cutting the downloads in progress
+# ---------------------------------------------------------------------------
+
+SELF_PATH = os.path.abspath(__file__)
+UPDATE_ON = os.environ.get("AUTO_UPDATE") == "1"
+UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "claude/gallant-turing-94jcs7")
+UPDATE_URL = os.environ.get(
+    "UPDATE_URL", "https://raw.githubusercontent.com/Rolbubx/DSiShopV2/%s/"
+    "catalog-server/catalog.py" % UPDATE_BRANCH)
+UPDATE_EVERY = max(1, int(os.environ.get("UPDATE_EVERY", "10")))
+UPDATE_DRAIN_MAX = int(os.environ.get("UPDATE_DRAIN_MAX", "1800"))
+UPDATE_MAX_SIZE = 2 * 1024 * 1024
+
+with open(SELF_PATH, "rb") as _f:
+    SELF_HASH = hashlib.sha256(_f.read()).hexdigest()
+
+transfers = 0                        # file downloads being sent to consoles
+transfers_cond = threading.Condition()
+paused = threading.Event()           # set while an update waits for them to end
+
+
+def begin_transfer():
+    """False while an update is pending: the caller answers 503 (try again)."""
+    global transfers
+    with transfers_cond:
+        if paused.is_set():
+            return False
+        transfers += 1
+        return True
+
+
+def end_transfer():
+    global transfers
+    with transfers_cond:
+        transfers -= 1
+        transfers_cond.notify_all()
+
+
+def drain(timeout):
+    """Stop accepting new downloads, wait for the running ones. True if all ended."""
+    deadline = time.time() + timeout
+    with transfers_cond:
+        paused.set()
+        while transfers > 0:
+            left = deadline - time.time()
+            if left <= 0:
+                return False
+            transfers_cond.wait(min(left, 5))
+    return True
+
+
+def update_fetch(etag):
+    """(etag, data) of the file on GitHub, or (etag, None) when unchanged."""
+    headers = {"User-Agent": "dsishop-catalog"}
+    if etag:
+        headers["If-None-Match"] = etag
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(UPDATE_URL, headers=headers),
+                                   timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return etag, None
+        raise
+    with r:
+        return r.headers.get("ETag") or "", r.read(UPDATE_MAX_SIZE + 1)
+
+
+def update_loads(path):
+    """The new file must import cleanly (nothing is started by importing it)."""
+    # The file ends in ".new": the loader has to be given explicitly
+    code = ("import importlib.machinery, importlib.util, sys;"
+            "l = importlib.machinery.SourceFileLoader('c', sys.argv[1]);"
+            "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('c', l));"
+            "l.exec_module(m);"
+            "assert hasattr(m, 'Handler')")
+    try:
+        return subprocess.run([sys.executable, "-c", code, path], capture_output=True,
+                              timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def update_apply(data):
+    """Check the new file, pause the downloads, replace this file, restart."""
+    new = SELF_PATH + ".new"
+    with open(new, "wb") as f:
+        f.write(data)
+    try:
+        if not update_loads(new):
+            raise ValueError("the new catalog.py does not load")
+        print("update: new version, pausing new downloads", flush=True)
+        if not drain(UPDATE_DRAIN_MAX):
+            print("update: downloads still running after %d s, restarting anyway"
+                  % UPDATE_DRAIN_MAX, flush=True)
+        shutil.copyfile(SELF_PATH, SELF_PATH + ".prev")
+        os.replace(new, SELF_PATH)
+        print("update: restarting", flush=True)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except BaseException:
+        paused.clear()           # still the old version: downloads resume
+        try:
+            os.remove(new)
+        except OSError:
+            pass
+        raise
+
+
+def update_loop():
+    etag, bad, last_error = "", "", ""
+    print("update: following %s every %d s" % (UPDATE_URL, UPDATE_EVERY), flush=True)
+    while True:
+        time.sleep(UPDATE_EVERY)
+        try:
+            etag, data = update_fetch(etag)
+            last_error = ""
+            if data is None:
+                continue
+            digest = hashlib.sha256(data).hexdigest()
+            if digest == SELF_HASH or digest == bad:
+                continue
+            try:
+                if len(data) > UPDATE_MAX_SIZE:
+                    raise ValueError("file too big")
+                update_apply(data)
+            except Exception as e:
+                bad = digest      # do not retry the same broken file every 10 s
+                print("update: not applied:", e, flush=True)
+        except Exception as e:
+            if str(e) != last_error:  # log a failing check once, not every 10 s
+                print("update: check failed:", e, flush=True)
+            last_error = str(e)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -760,6 +911,21 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionError):
                 pass
 
+    def counted(self, serve, parts):
+        """Run a download handler; refused (503) while an update is pending."""
+        if not begin_transfer():
+            body = b"update in progress, try again in a minute\n"
+            self.send_response(503)
+            self.send_header("Retry-After", "30")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        try:
+            serve(parts)
+        finally:
+            end_transfer()
+
     def reply(self, code, text, ctype="text/plain; charset=utf-8"):
         body = text.encode("utf-8")
         self.send_response(code)
@@ -776,7 +942,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             limit = 30
         if url.path == "/health":
-            self.reply(200, "ok %d %d\n" % (len(merged()), last_crawl))
+            self.reply(200, "ok %d %d %s\n" % (len(merged()), last_crawl, SELF_HASH[:8]))
         elif url.path == "/search":
             q = qs.get("q", [""])[0][:60]
             if not re.fullmatch(r"[\w .\-]+", q):
@@ -786,9 +952,14 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path.startswith("/api/"):
             self.serve_api([urllib.parse.unquote(p) for p in url.path.strip("/").split("/")])
         elif url.path.startswith("/file/"):
-            self.serve_file([urllib.parse.unquote(p) for p in url.path.strip("/").split("/")])
+            self.counted(self.serve_file,
+                         [urllib.parse.unquote(p) for p in url.path.strip("/").split("/")])
         elif url.path.startswith("/twilight/"):
-            self.serve_twilight([urllib.parse.unquote(p) for p in url.path.strip("/").split("/")])
+            parts = [urllib.parse.unquote(p) for p in url.path.strip("/").split("/")]
+            if len(parts) > 1 and parts[1] == "pack":
+                self.counted(self.serve_twilight, parts)    # a download: pausable
+            else:
+                self.serve_twilight(parts)
         elif url.path == "/user":
             name = qs.get("name", [""])[0]
             if not re.fullmatch(r"[A-Za-z0-9\-]{1,39}", name):
@@ -803,6 +974,8 @@ if __name__ == "__main__":
     udb_load()
     threading.Thread(target=udb_loop, daemon=True).start()
     twl_load()
+    if UPDATE_ON:
+        threading.Thread(target=update_loop, daemon=True).start()
     threading.Thread(target=crawl_loop, daemon=True).start()
     print("listening on 127.0.0.1:%d" % PORT, flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
