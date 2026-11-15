@@ -1,9 +1,15 @@
-# Build BlocksDS
 build/
 *.nds
 *.elf
-image.bin
+*.map
+*.dump
 compile_commands.json
+image.bin
+tools/sim/dsishop_sim
+screenshots/
+tools/test/test_zip
+tools/test/test_remote
+tools/test/lremote_pc
 
 # Serveur de catalogue
 catalog.json

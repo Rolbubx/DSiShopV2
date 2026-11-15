@@ -6,22 +6,46 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  nds:
+    name: ROM .nds (BlocksDS)
     runs-on: ubuntu-latest
-    container: skylyrac/blocksds:slim-latest
+    container: skylyrac/blocksds:slim-v1.25.0
     steps:
       - uses: actions/checkout@v4
-
-      - name: Installer les bibliothèques (zlib, Mbed TLS, libcurl)
-        run: |
-          wf-pacman -Sy --noconfirm \
-            toolchain-gcc-arm-none-eabi-zlib blocksds-mbedtls blocksds-libcurl
-
-      - name: Compiler
-        run: make -j"$(nproc)"
-
+      - name: Dépendances (zlib, Mbed TLS, libcurl)
+        run: wf-pacman -Sy --noconfirm toolchain-gcc-arm-none-eabi-zlib blocksds-mbedtls blocksds-libcurl
+      - name: Compilation
+        run: make -j$(nproc)
       - uses: actions/upload-artifact@v4
         with:
           name: DSiShop
           path: DSiShop.nds
-          if-no-files-found: error
+
+  sim:
+    name: Simulateur PC (captures d'écran)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilation et exécution
+        run: |
+          make -C tools/sim
+          mkdir -p screenshots
+          ./tools/sim/dsishop_sim screenshots
+      - name: Tests ZIP / fichiers découpés (dont une archive ZIP64 de 4,5 Go creuse)
+        run: make -C tools/test check BIG=--big OUT=$RUNNER_TEMP/zip_tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+
+  remote-server:
+    name: Serveur Remote (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests
+        working-directory: remote-server
+        run: npm test
