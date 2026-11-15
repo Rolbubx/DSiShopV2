@@ -188,7 +188,11 @@ int main(int argc, char **argv)
     tap(214, 147);             // Raccourci "Plus"
     frames(2);
     save(dir, "08_plus");
-    tap(128, 39);              // Mettre à jour TWiLight Menu++
+    tap(128, 60);              // Au démarrage : bascule sur DSi Shop
+    frames(2);
+    save(dir, "08b_plus_demarrage");
+    frames(200);               // Laisse le message disparaître
+    tap(128, 37);              // Mettre à jour TWiLight Menu++
     frames(30);
     save(dir, "09_twilight_version");
     tap(128, 119);             // Mettre à jour

@@ -65,9 +65,6 @@ static void boot_step(int step, int total, const char *msg)
 
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
-
     // Le lanceur (fondu blanc de TWiLight Menu++) peut laisser la luminosité
     // au blanc : sans ça, tout l'écran reste blanc sur une vraie DSi
     setBrightness(3, 0);
@@ -103,6 +100,8 @@ int main(int argc, char **argv)
     // Carte SD (pour installer les jeux) puis Wi-Fi
     boot_step(1, 4, "carte SD...");
     installer_init();
+    // Notre propre chemin : sert à se lancer tout seul au démarrage
+    installer_set_self_path(argc > 0 && argv ? argv[0] : NULL);
     boot_step(2, 4, skip_wifi ? "Wi-Fi désactivé (B)" : "Wi-Fi...");
     bool wifi_ok = skip_wifi ? false : net_init();
     boot_step(3, 4, "Remote...");

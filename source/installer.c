@@ -19,6 +19,7 @@
 #include "installer.h"
 #include "splitfile.h"
 #include "sysupdate.h"
+#include "twlini.h"
 #include "zip.h"
 
 #define USER_AGENT "DSiShop/0.2 (Nintendo DSi; +https://github.com)"
@@ -1650,6 +1651,37 @@ void installer_twl_progress(int *pack, int *packs, uint64_t *now, uint64_t *tota
     *packs = twl.man.count;
     *now = twl.done_before + cur;
     *total = twl.total;
+}
+
+// ---------------------------------------------------------------------------
+// Lancer DSi Shop au démarrage
+// ---------------------------------------------------------------------------
+
+static char self_path[256];
+
+void installer_set_self_path(const char *path)
+{
+    // TWiLight Menu++ note ses chemins sous la forme "sd:/dossier/fichier.nds"
+    if (path && strncasecmp(path, "sd:/", 4) == 0 && ends_with_ci(path, ".nds") &&
+        strlen(path) < sizeof(self_path))
+        snprintf(self_path, sizeof(self_path), "%s", path);
+    else
+        self_path[0] = '\0';
+}
+
+bool installer_autoboot_available(void)
+{
+    return self_path[0] != '\0' && installer_twl_present();
+}
+
+bool installer_autoboot_get(void)
+{
+    return installer_autoboot_available() && twlini_autoboot_get(inst.root, self_path);
+}
+
+bool installer_autoboot_set(bool on)
+{
+    return installer_autoboot_available() && twlini_autoboot_set(inst.root, self_path, on);
 }
 
 upd_status_t installer_update_status(const char *file, const char **latest)

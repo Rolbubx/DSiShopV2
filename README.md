@@ -57,6 +57,7 @@ source/
   splitfile.c/.h  fichier découpé en morceaux de 1 Go (limite FAT32 de 4 Go)
   zip.c/.h      extraction ZIP / ZIP64 (portable, testé sur PC)
   sysupdate.c/.h  mise à jour de TWiLight Menu++ par paquets (portable, testé sur PC)
+  twlini.c/.h   réglages de TWiLight Menu++ : lancement de DSi Shop au démarrage (portable)
   cacert.s      embarque data/cacert.pem (certificats racines)
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
@@ -220,6 +221,21 @@ Le premier appel à `/twilight/manifest` lance la préparation en arrière-plan 
 cherchée toutes les 30 minutes. Tests : `python3 catalog-server/test_twilight.py`, et
 `make -C tools/test check` qui applique de vrais paquets du serveur avec le code de la
 console sur une fausse carte SD (coupure, reprise, paquet corrompu).
+
+## Lancer DSi Shop au démarrage
+
+Menu **Plus → Au démarrage : …** bascule entre le menu de TWiLight Menu++ et DSi Shop.
+
+TWiLight Menu++ sait relancer tout seul la *dernière ROM lancée* (réglage `AUTORUNGAME`
+de `_nds/TWiLightMenu/settings.ini`), sauf si on maintient **B** au démarrage. Le bouton
+active ce réglage et, si besoin, note DSi Shop comme dernière ROM (`ROM_PATH`,
+`LAUNCH_TYPE`…). Les autres lignes du fichier sont recopiées telles quelles.
+
+- Pour ouvrir le menu de TWiLight : **maintenir B** pendant le démarrage.
+- Si tu lances un autre jeu depuis TWiLight, c'est lui qui devient la « dernière ROM » et
+  qui démarrera tout seul ; rouvre DSi Shop et réactive l'option pour le remettre en premier.
+- Il faut TWiLight Menu++ sur la carte SD de la console, et que DSi Shop ait été lancé
+  depuis la SD (son chemin vient de `argv[0]`).
 
 ## Remote local
 

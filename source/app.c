@@ -81,6 +81,8 @@ static struct {
     int browse_scroll;
     int browse_mode;      // BMODE_SEARCH ou BMODE_USER
 
+    bool autoboot;        // DSi Shop se lance tout seul au démarrage
+
     bool reboot;
     unsigned int done_frame;
     inst_state_t last_inst_state;
@@ -117,6 +119,8 @@ static int reboot_seconds_left(void);
 
 static void go(app_screen_t screen)
 {
+    if (screen == SCREEN_MORE && app.screen != SCREEN_MORE)
+        app.autoboot = installer_autoboot_get();   // Relu sur la carte SD
     app.screen = screen;
     app.force_redraw = true;
     ui_reset_focus();
@@ -1090,8 +1094,8 @@ static void screen_more(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Plus", NULL);
 
-    const int bh = 22, step = 26;
-    int y = 28;
+    const int bh = 20, step = 23;
+    int y = 27;
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Mettre à jour TWiLight Menu++",
                   BTN_STYLE_NORMAL, true))
     {
@@ -1099,6 +1103,21 @@ static void screen_more(canvas_t *c, const input_t *in)
         // Demande tout de suite la dernière version (sauf mise à jour en cours)
         if (installer_twl_present() && net_state() == NET_CONNECTED && !twl_busy())
             installer_twl_check();
+    }
+    y += step;
+    // TWiLight Menu++ relance tout seul la dernière ROM (ici : DSi Shop)
+    if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh),
+                  app.autoboot ? "Au démarrage : DSi Shop" : "Au démarrage : TWiLight Menu++",
+                  BTN_STYLE_NORMAL, installer_autoboot_available()))
+    {
+        if (!installer_autoboot_set(!app.autoboot))
+            ui_toast("Réglages de TWiLight non modifiables");
+        else
+        {
+            app.autoboot = !app.autoboot;
+            ui_toast(app.autoboot ? "Maintiens B au démarrage : TWiLight"
+                                  : "Au démarrage : menu TWiLight");
+        }
     }
     y += step;
     if (ui_button(c, RECT(BTN_X0, y, BTN_W, bh), "Test Internet (HTTP)",

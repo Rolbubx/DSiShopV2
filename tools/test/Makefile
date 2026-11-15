@@ -1,4 +1,4 @@
-# Tests PC de splitfile.c, zip.c et sysupdate.c. Nécessite gcc, zlib et Python 3.
+# Tests PC de splitfile.c, zip.c, sysupdate.c et twlini.c. Nécessite gcc, zlib et Python 3.
 SRC := test_zip.c ../../source/splitfile.c ../../source/zip.c
 OUT ?= /tmp/dsishop_tests
 
@@ -22,15 +22,19 @@ SYSUPD_SRC := test_sysupdate.c ../../source/sysupdate.c ../../source/zip.c \
 test_sysupdate: $(SYSUPD_SRC) $(wildcard ../../source/*.h)
 	$(CC) $(CFLAGS_TEST) -o $@ $(SYSUPD_SRC) -lz
 
-check: test_zip test_remote lremote_pc test_sysupdate
+test_twlini: test_twlini.c ../../source/twlini.c ../../source/twlini.h
+	$(CC) $(CFLAGS_TEST) -o $@ test_twlini.c ../../source/twlini.c
+
+check: test_zip test_remote lremote_pc test_sysupdate test_twlini
 	python3 gen_zips.py $(OUT) $(BIG)
 	./test_zip $(OUT) $(BIG)
 	rm -rf $(OUT)/games_test
 	./test_remote $(OUT)
 	python3 test_lremote.py ./lremote_pc $(OUT)
+	./test_twlini $(OUT)
 	python3 test_sysupdate.py ./test_sysupdate $(OUT) $(TWL_RELEASE)
 
 clean:
-	rm -f test_zip test_remote lremote_pc test_sysupdate
+	rm -f test_zip test_remote lremote_pc test_sysupdate test_twlini
 
 .PHONY: check clean

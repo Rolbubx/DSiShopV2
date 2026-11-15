@@ -129,6 +129,17 @@ int installer_twl_resume(void);
 // Avancement : paquet en cours (à partir de 1), nombre de paquets, octets
 void installer_twl_progress(int *pack, int *packs, uint64_t *now, uint64_t *total);
 
+// ---------------------------------------------------------------------------
+// Lancer DSi Shop au démarrage (réglage de TWiLight Menu++, voir twlini.h)
+// ---------------------------------------------------------------------------
+
+// Chemin de DSi Shop sur la carte (argv[0]), à donner au démarrage
+void installer_set_self_path(const char *path);
+// Possible seulement avec TWiLight Menu++ sur la SD et un chemin connu
+bool installer_autoboot_available(void);
+bool installer_autoboot_get(void);
+bool installer_autoboot_set(bool on);
+
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);
 // Espace libre sur la carte SD en octets (0 si inconnu)
