@@ -21,6 +21,34 @@ jobs:
           name: DSiShop
           path: DSiShop.nds
 
+  # Sur main : publie la ROM comme release "v<APP_VERSION>" si elle n'existe pas
+  # encore. C'est cette release que DSi Shop télécharge pour se mettre à jour :
+  # il suffit donc d'augmenter APP_VERSION dans source/app.h.
+  release:
+    name: Release (mise à jour de DSi Shop)
+    needs: [nds, sim]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: DSiShop
+      - name: Publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="v$(sed -n 's/^#define APP_VERSION "\(.*\)"/\1/p' source/app.h)"
+          test "$version" != "v"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "La release $version existe déjà : rien à publier."
+          else
+            gh release create "$version" DSiShop.nds --target "$GITHUB_SHA" \
+              --title "DSi Shop $version" --generate-notes
+          fi
+
   sim:
     name: Simulateur PC (captures d'écran)
     runs-on: ubuntu-latest

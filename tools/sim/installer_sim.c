@@ -27,6 +27,9 @@ static game_t list[GAMES_MAX];
 
 void installer_sim_tick(void);
 static void twl_sim_tick(void);
+static void self_sim_tick(void);
+static self_state_t self_st = SELF_IDLE;
+static int self_timer;
 
 // Mise à jour de TWiLight Menu++ (simulée plus bas)
 static twl_state_t twl_st = TWL_IDLE;
@@ -147,6 +150,7 @@ static void write_rom(const char *file, const char *content)
 void installer_sim_tick(void)
 {
     twl_sim_tick();
+    self_sim_tick();
     if (checking)
     {
         check_timer++;
@@ -223,7 +227,12 @@ const char *installer_file_name(void) { return name; }
 const char *installer_release(void) { return updating ? "v1.1.0" : "v1.2.0"; }
 const char *installer_dest_path(void) { return "sd:/roms/nds/MonJeu.nds"; }
 uint64_t installer_progress_now(void) { return now; }
-uint64_t installer_progress_total(void) { return state == INST_DOWNLOADING ? total : 0; }
+uint64_t installer_progress_total(void)
+{
+    if (self_st == SELF_UPDATING)
+        return 1800000;
+    return state == INST_DOWNLOADING ? total : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Réglages : gardés en mémoire le temps de la simulation
@@ -358,3 +367,24 @@ void installer_set_self_path(const char *path) { (void)path; }
 bool installer_autoboot_available(void) { return true; }
 bool installer_autoboot_get(void) { return autoboot_on; }
 bool installer_autoboot_set(bool on) { autoboot_on = on; return true; }
+
+// Mise à jour de DSi Shop lui-même : simulée
+bool installer_self_available(void) { return true; }
+bool installer_self_check(const char *current) { (void)current; self_st = SELF_CHECKING; self_timer = 0; return true; }
+bool installer_self_update(void) { self_st = SELF_UPDATING; self_timer = 0; now = 0; return true; }
+self_state_t installer_self_state(void) { return self_st; }
+const char *installer_self_message(void) { return ""; }
+const char *installer_self_latest(void) { return "v0.6.0"; }
+bool installer_self_newer(void) { return self_st == SELF_READY; }
+
+static void self_sim_tick(void)
+{
+    if (self_st == SELF_CHECKING && ++self_timer >= 20)
+        self_st = SELF_READY;
+    else if (self_st == SELF_UPDATING)
+    {
+        now = 1800000ull * (uint64_t)++self_timer / 60;
+        if (self_timer >= 60)
+            self_st = SELF_DONE;
+    }
+}

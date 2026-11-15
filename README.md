@@ -222,6 +222,18 @@ cherchée toutes les 30 minutes. Tests : `python3 catalog-server/test_twilight.p
 `make -C tools/test check` qui applique de vrais paquets du serveur avec le code de la
 console sur une fausse carte SD (coupure, reprise, paquet corrompu).
 
+## Mettre à jour DSi Shop
+
+Menu **Plus → À propos → Rechercher une mise à jour** : l'appli demande la dernière
+release GitHub du projet (via le serveur du catalogue), compare son numéro avec
+`APP_VERSION`, télécharge `DSiShop.nds`, vérifie que c'est une ROM DS valide puis remplace
+son propre fichier sur la carte SD (son chemin vient de `argv[0]`). L'ancienne version
+est gardée dans `_dsishop/DSiShop.old.nds` ; il reste à redémarrer la console.
+
+Pour publier une version : augmenter `APP_VERSION` dans `source/app.h` et pousser sur
+`main`. GitHub Actions compile la ROM et crée la release `v<APP_VERSION>` avec
+`DSiShop.nds` (job `release` de `.github/workflows/build.yml`), si elle n'existe pas déjà.
+
 ## Lancer DSi Shop au démarrage
 
 Menu **Plus → Au démarrage : …** bascule entre le menu de TWiLight Menu++ et DSi Shop.

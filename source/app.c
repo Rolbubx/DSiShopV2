@@ -186,11 +186,17 @@ static bool twl_busy(void)
     return s == TWL_CHECKING || s == TWL_UPDATING;
 }
 
+static bool self_busy(void)
+{
+    self_state_t s = installer_self_state();
+    return s == SELF_CHECKING || s == SELF_UPDATING;
+}
+
 static bool net_busy(void)
 {
     net_state_t s = net_state();
     return s == NET_CONNECTING || s == NET_SCANNING || http_state() == HTTP_BUSY ||
-           install_busy() || twl_busy();
+           install_busy() || twl_busy() || self_busy();
 }
 
 // "4,2 Go", "1,4 Mo", "820 Ko"...
@@ -993,6 +999,7 @@ static uint32_t top_signature(void)
         installer_check_progress(&done, &total);
         MIX(done);
     }
+    MIX(installer_self_state());
     MIX(installer_twl_state());
     MIX(strlen(installer_twl_installed()));
     MIX(strlen(installer_twl_latest()));
@@ -2361,12 +2368,81 @@ static void screen_about(canvas_t *c, const input_t *in)
 {
     ui_header(c, "À propos", NULL);
 
-    gfx_text_box(c, &font_title, 0, 50, SCREEN_W, ALIGN_CENTER, APP_NAME, COL_TEXT);
-    gfx_text_box(c, &font_small, 0, 50 + font_title.height, SCREEN_W, ALIGN_CENTER,
+    gfx_text_box(c, &font_title, 0, 30, SCREEN_W, ALIGN_CENTER, APP_NAME, COL_TEXT);
+    gfx_text_box(c, &font_small, 0, 30 + font_title.height, SCREEN_W, ALIGN_CENTER,
                  "Version " APP_VERSION, COL_TEXT_DIM);
 
-    if (ui_button(c, RECT(BTN_X0, 120, BTN_W, BTN_H), "Retour", BTN_STYLE_NORMAL,
-                  true) ||
+    // Mise à jour de DSi Shop lui-même (dernière release GitHub du projet)
+    self_state_t st = installer_self_state();
+    bool online = net_state() == NET_CONNECTED;
+    bool can = online && installer_self_available();
+    const int ty = 66, by = 102;
+    char line[160];
+
+    if (st == SELF_UPDATING)
+    {
+        uint64_t now = installer_progress_now(), total = installer_progress_total();
+        snprintf(line, sizeof(line), "Téléchargement de %s…", installer_self_latest());
+        gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+        draw_progress_bar(c, RECT(BTN_X0, ty + 18, BTN_W, 10), now, total);
+        if (ui_button(c, RECT(BTN_X0, by + BTN_H + 6, BTN_W, BTN_H), "Annuler",
+                      BTN_STYLE_DANGER, true))
+            installer_cancel();
+        return;
+    }
+
+    if (st == SELF_CHECKING)
+    {
+        gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER,
+                     "Recherche d'une nouvelle version…", COL_TEXT);
+    }
+    else if (st == SELF_DONE)
+    {
+        snprintf(line, sizeof(line), "%s installée : redémarre pour l'utiliser",
+                 installer_self_latest());
+        gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER, line, COL_OK);
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), "Redémarrer la console",
+                      BTN_STYLE_PRIMARY, true))
+            app.reboot = true;
+    }
+    else if (st == SELF_READY && installer_self_newer())
+    {
+        snprintf(line, sizeof(line), "Nouvelle version disponible : %s",
+                 installer_self_latest());
+        gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER, line, COL_OK);
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), "Mettre à jour DSi Shop",
+                      BTN_STYLE_PRIMARY, can))
+        {
+            if (!installer_self_update())
+                ui_toast("Impossible de lancer la mise à jour");
+        }
+    }
+    else
+    {
+        if (st == SELF_READY)
+            gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER,
+                         "DSi Shop est à jour", COL_TEXT_DIM);
+        else if (st == SELF_ERROR)
+            gfx_text_wrap(c, &font_small, 16, ty - 6, SCREEN_W - 32, 38,
+                          installer_self_message(), COL_ERR);
+        else if (!installer_self_available())
+            gfx_text_wrap(c, &font_small, 16, ty - 6, SCREEN_W - 32, 38,
+                          "Mise à jour impossible : DSi Shop ne sait pas où il est "
+                          "rangé sur la carte SD.", COL_TEXT_DIM);
+        else if (!online)
+            gfx_text_box(c, &font_small, 8, ty, SCREEN_W - 16, ALIGN_CENTER,
+                         "Connecte-toi au Wi-Fi pour chercher une mise à jour", COL_WARN);
+
+        if (ui_button(c, RECT(BTN_X0, by, BTN_W, BTN_H), "Rechercher une mise à jour",
+                      BTN_STYLE_NORMAL, can && st != SELF_CHECKING))
+        {
+            if (!installer_self_check(APP_VERSION))
+                ui_toast("Impossible de lancer la recherche");
+        }
+    }
+
+    if (ui_button(c, RECT(BTN_X0, by + BTN_H + 6, BTN_W, BTN_H), "Retour",
+                  BTN_STYLE_NORMAL, true) ||
         (in->down & BTN_B))
         go(SCREEN_MORE);
 }
@@ -2480,6 +2556,7 @@ void app_frame(const input_t *in)
                          app.screen == SCREEN_INSTALL_DONE ||
                          (app.screen == SCREEN_INSTALL && install_busy()) ||
                          (app.screen == SCREEN_TWL && twl_busy()) ||
+                         (app.screen == SCREEN_ABOUT && self_busy()) ||
                          (app.screen == SCREEN_REMOTE && remote_pair_url()[0] == '\0');
 
     app_screen_t drawn = app.screen;

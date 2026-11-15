@@ -102,6 +102,16 @@ static char browse_msg[160];
 static browse_repo_t browse_list[BROWSE_MAX];
 static int browse_count;
 
+// Mise à jour de DSi Shop lui-même
+static struct {
+    volatile self_state_t state;
+    char msg[192];
+    char current[32];   // Version qui tourne
+    char latest[64];    // Tag de la dernière release
+    char url[512];
+    bool newer;
+} self;
+
 // Mise à jour de TWiLight Menu++
 static struct {
     volatile twl_state_t state;
@@ -1120,7 +1130,8 @@ static bool can_start(void)
     if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
         return false;
     if (inst.checking || browse_state == BROWSE_LOADING || !inst.storage_ok ||
-        !inst.curl_ok || twl.state == TWL_CHECKING || twl.state == TWL_UPDATING)
+        !inst.curl_ok || twl.state == TWL_CHECKING || twl.state == TWL_UPDATING ||
+        self.state == SELF_CHECKING || self.state == SELF_UPDATING)
         return false;
     return free_thread_slot();
 }
@@ -1661,9 +1672,11 @@ static char self_path[256];
 
 void installer_set_self_path(const char *path)
 {
-    // TWiLight Menu++ note ses chemins sous la forme "sd:/dossier/fichier.nds"
-    if (path && strncasecmp(path, "sd:/", 4) == 0 && ends_with_ci(path, ".nds") &&
-        strlen(path) < sizeof(self_path))
+    // Chemin complet sur la carte, ex. "sd:/roms/nds/DSiShop.nds" (c'est aussi
+    // sous cette forme que TWiLight Menu++ note la dernière ROM lancée)
+    size_t r = strlen(inst.root);
+    if (path && r > 0 && strncasecmp(path, inst.root, r) == 0 && path[r] == '/' &&
+        ends_with_ci(path, ".nds") && strlen(path) < sizeof(self_path))
         snprintf(self_path, sizeof(self_path), "%s", path);
     else
         self_path[0] = '\0';
@@ -1683,6 +1696,134 @@ bool installer_autoboot_set(bool on)
 {
     return installer_autoboot_available() && twlini_autoboot_set(inst.root, self_path, on);
 }
+
+// ---------------------------------------------------------------------------
+// Mise à jour de DSi Shop lui-même
+// ---------------------------------------------------------------------------
+
+// Projet GitHub qui publie les releases de DSi Shop (fichier DSiShop.nds)
+#define SELF_REPO "Rolbubx/DSiShopV2"
+
+static int self_check_thread(void *arg)
+{
+    (void)arg;
+    char err[192], name[128];
+
+    if (github_latest(CATALOG_URL "/api/repos/" SELF_REPO "/releases/latest", ".nds",
+                      self.latest, sizeof(self.latest), self.url, sizeof(self.url),
+                      name, sizeof(name), err, sizeof(err)) != 0)
+    {
+        if (strstr(err, "aucune release"))
+            snprintf(self.msg, sizeof(self.msg), "Aucune version publiée pour le moment");
+        else
+            snprintf(self.msg, sizeof(self.msg), "%.191s", err);
+        self.state = SELF_ERROR;
+        return 0;
+    }
+    if (!ends_with_ci(name, ".nds"))
+    {
+        snprintf(self.msg, sizeof(self.msg), "La dernière version ne contient pas de .nds");
+        self.state = SELF_ERROR;
+        return 0;
+    }
+    self.newer = sysupd_version_cmp(self.latest, self.current) > 0;
+    self.state = SELF_READY;
+    return 0;
+}
+
+static int self_fail(const char *msg, const char *tmp)
+{
+    snprintf(self.msg, sizeof(self.msg), "%.191s", msg);
+    sfile_remove(tmp);
+    self.state = SELF_ERROR;
+    return 0;
+}
+
+static int self_update_thread(void *arg)
+{
+    (void)arg;
+    char dir[64], tmp[96], part[128], old[96], err[192];
+
+    snprintf(dir, sizeof(dir), "%s/_dsishop", inst.root);
+    mkdir_p(dir);
+    snprintf(tmp, sizeof(tmp), "%s/self_download", dir);
+    snprintf(old, sizeof(old), "%s/DSiShop.old.nds", dir);
+    sfile_remove(tmp);
+
+    sfile_t sf;
+    if (!sfile_open_write(&sf, tmp, SPLIT_CHUNK_DEFAULT))
+        return self_fail("Impossible d'écrire sur la carte SD", tmp);
+    int ret = http_req(self.url, false, &sf, NULL, err, sizeof(err));
+    unsigned int parts = sfile_part_count(&sf);
+    bool write_ok = sfile_close(&sf);
+    if (ret != 0)
+        return self_fail(inst.cancel && !inst.no_space ? "Mise à jour annulée" : err, tmp);
+    if (!write_ok)
+        return self_fail("Erreur d'écriture sur la carte SD (pleine ?)", tmp);
+
+    // On ne remplace DSi Shop que par une vraie ROM DS (en-tête vérifié)
+    sfile_part_path(tmp, 0, part, sizeof(part));
+    if (parts != 1 || !is_nds_rom(part))
+        return self_fail("Le fichier téléchargé n'est pas une ROM DS valide", tmp);
+
+    // L'ancienne version est gardée dans _dsishop/DSiShop.old.nds. Si la mise
+    // en place échoue, elle est remise à sa place.
+    remove(old);
+    if (rename(self_path, old) != 0)
+        return self_fail("Impossible de remplacer DSi Shop sur la carte SD", tmp);
+    if (rename(part, self_path) != 0)
+    {
+        rename(old, self_path);
+        return self_fail("Impossible de remplacer DSi Shop sur la carte SD", tmp);
+    }
+    self.newer = false;
+    self.state = SELF_DONE;
+    return 0;
+}
+
+static bool self_launch(int (*fn)(void *), self_state_t state)
+{
+    if (!can_start())
+        return false;
+    self.msg[0] = '\0';
+    inst.cancel = false;
+    self.state = state;
+    inst.thread = cothread_create(fn, NULL, 128 * 1024, 0);
+    if (inst.thread < 0)
+    {
+        self.state = SELF_ERROR;
+        snprintf(self.msg, sizeof(self.msg), "Impossible de créer la tâche");
+        return false;
+    }
+    inst.thread_alive = true;
+    return true;
+}
+
+bool installer_self_available(void)
+{
+    return inst.storage_ok && self_path[0] != '\0';
+}
+
+bool installer_self_check(const char *current_version)
+{
+    if (!installer_self_available())
+        return false;
+    snprintf(self.current, sizeof(self.current), "%s", current_version);
+    return self_launch(self_check_thread, SELF_CHECKING);
+}
+
+bool installer_self_update(void)
+{
+    if (!installer_self_available() || !self.url[0] ||
+        (self.state != SELF_READY && self.state != SELF_ERROR))
+        return false;
+    return self_launch(self_update_thread, SELF_UPDATING);
+}
+
+self_state_t installer_self_state(void) { return self.state; }
+const char *installer_self_message(void) { return self.msg; }
+const char *installer_self_latest(void) { return self.latest; }
+bool installer_self_newer(void) { return self.newer; }
 
 upd_status_t installer_update_status(const char *file, const char **latest)
 {

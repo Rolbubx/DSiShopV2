@@ -66,6 +66,10 @@ bool sysupd_installed_version(const char *root, char *out, size_t size);
 // Numéro du paquet où reprendre une mise à jour interrompue vers `tag` (0 sinon)
 int sysupd_resume_index(const char *root, const char *tag);
 
+// Compare deux versions ("v1.10.0", "1.9"...) nombre par nombre : < 0, 0 ou > 0.
+// Un "v" initial est ignoré ; "1.2" et "1.2.0" sont égales.
+int sysupd_version_cmp(const char *a, const char *b);
+
 // Applique la mise à jour. Renvoie 0, ou -1 avec un message dans err.
 int sysupd_apply(const char *root, const sysupd_manifest_t *m, const sysupd_io_t *io,
                  char *err, size_t err_size);

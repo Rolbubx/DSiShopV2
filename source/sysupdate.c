@@ -183,6 +183,26 @@ static bool save_state(const char *root, const char *tag, int next)
     return fclose(f) == 0;
 }
 
+int sysupd_version_cmp(const char *a, const char *b)
+{
+    if (*a == 'v' || *a == 'V')
+        a++;
+    if (*b == 'v' || *b == 'V')
+        b++;
+    while (*a || *b)
+    {
+        unsigned long x = strtoul(a, (char **)&a, 10), y = strtoul(b, (char **)&b, 10);
+        if (x != y)
+            return x < y ? -1 : 1;
+        // Passe au nombre suivant (séparateur quelconque)
+        while (*a && (*a < '0' || *a > '9'))
+            a++;
+        while (*b && (*b < '0' || *b > '9'))
+            b++;
+    }
+    return 0;
+}
+
 #define FAIL(...) do { snprintf(err, err_size, __VA_ARGS__); return -1; } while (0)
 
 typedef struct {

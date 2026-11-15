@@ -140,6 +140,28 @@ bool installer_autoboot_available(void);
 bool installer_autoboot_get(void);
 bool installer_autoboot_set(bool on);
 
+// ---------------------------------------------------------------------------
+// Mise à jour de DSi Shop lui-même (dernière release GitHub du projet)
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    SELF_IDLE,
+    SELF_CHECKING,   // Demande la dernière release
+    SELF_READY,      // Version connue (voir installer_self_newer)
+    SELF_UPDATING,   // Téléchargement et remplacement du fichier
+    SELF_DONE,       // Remplacé : il faut redémarrer
+    SELF_ERROR,
+} self_state_t;
+
+// Possible seulement si DSi Shop connaît son propre fichier sur la carte
+bool installer_self_available(void);
+bool installer_self_check(const char *current_version);
+bool installer_self_update(void);
+self_state_t installer_self_state(void);
+const char *installer_self_message(void);  // Message d'erreur
+const char *installer_self_latest(void);   // Version publiée, ex. "v0.6.0"
+bool installer_self_newer(void);           // Plus récente que celle qui tourne
+
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);
 // Espace libre sur la carte SD en octets (0 si inconnu)

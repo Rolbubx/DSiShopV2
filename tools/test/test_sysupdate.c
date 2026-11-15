@@ -99,6 +99,22 @@ int main(int argc, char **argv)
         }
     }
 
+    // Comparaison de versions
+    static const struct { const char *a, *b; int want; } cmp[] = {
+        { "v0.5.0", "0.5.0", 0 }, { "v0.6.0", "0.5.0", 1 }, { "0.5.0", "v0.10.0", -1 },
+        { "v1.2", "1.2.0", 0 }, { "v1.2.1", "1.2", 1 }, { "v27.25.1", "v27.24.0", 1 },
+        { "", "0.1", -1 }, { "v2", "v1.9.9", 1 },
+    };
+    for (size_t i = 0; i < sizeof(cmp) / sizeof(cmp[0]); i++)
+    {
+        int got = sysupd_version_cmp(cmp[i].a, cmp[i].b);
+        if ((got > 0) - (got < 0) != cmp[i].want)
+        {
+            printf("comparaison %s / %s : %d\n", cmp[i].a, cmp[i].b, got);
+            return 1;
+        }
+    }
+
     if (!sysupd_parse_manifest(text, &man))
     {
         printf("manifeste refusé\n");

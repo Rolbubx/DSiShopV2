@@ -200,6 +200,20 @@ int main(int argc, char **argv)
     save(dir, "10_twilight_paquets");
     frames(120);
     save(dir, "11_twilight_termine");
+
+    // Plus -> À propos -> mise à jour de DSi Shop
+    press(BTN_B);
+    frames(2);
+    tap(128, 129);             // À propos
+    frames(2);
+    tap(128, 117);             // Rechercher une mise à jour
+    frames(30);
+    save(dir, "12_a_propos_nouvelle_version");
+    tap(128, 117);             // Mettre à jour DSi Shop
+    frames(30);
+    save(dir, "13_a_propos_telechargement");
+    frames(60);
+    save(dir, "14_a_propos_termine");
     lremote_net_stop();
         return 0;
 }
