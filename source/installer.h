@@ -186,6 +186,7 @@ typedef struct {
     char version[64];   // Version (tag de release GitHub) ("" si inconnue)
     char source[120];   // "github.com/auteur/projet" ou nom du site
     uint64_t size;      // Taille du téléchargement (0 : inconnue)
+    uint64_t resume_done; // Octets déjà sur la carte : le téléchargement reprend (0 : depuis le début)
     bool archive;       // .zip : la ROM en sera extraite
     bool github;
 } install_info_t;
@@ -213,6 +214,32 @@ const char *installer_launch_game(const char *dir, const char *file);
 void installer_launch_restore(void);
 // Type du jeu reconnu à son en-tête ("Jeu DS", "Homebrew"...), pour la fiche
 const char *installer_rom_kind_text(const char *dir, const char *file);
+
+// ---------------------------------------------------------------------------
+// Reprise d'une installation interrompue
+// ---------------------------------------------------------------------------
+//
+// Si le téléchargement d'un jeu s'arrête (console éteinte, Wi-Fi perdu...), les
+// octets déjà reçus restent sur la carte avec un point de reprise (écrit au moins
+// tous les 4 Mo ou 15 s). Relancer la même installation reprend où elle s'était
+// arrêtée, à condition que le serveur ait toujours exactement le même fichier ;
+// sinon elle repart de zéro. Annuler l'installation efface ce qui a été reçu.
+
+typedef struct {
+    char name[128];     // Fichier en cours de téléchargement
+    char release[64];   // Version ("" si inconnue)
+    char link[256];     // Lien saisi à l'origine
+    uint64_t done;      // Octets déjà reçus
+    uint64_t total;     // Taille totale (0 : inconnue)
+    bool complete;      // Téléchargé en entier : il ne reste que l'extraction
+} resume_info_t;
+
+// Installation interrompue qui peut reprendre (NULL s'il n'y en a pas)
+const resume_info_t *installer_resume_pending(void);
+// La reprend, sans demander de confirmation (déjà confirmée avant l'interruption)
+bool installer_resume_start(void);
+// L'abandonne : efface ce qui avait été reçu
+void installer_resume_discard(void);
 
 // Configure la vérification HTTPS d'un handle libcurl (CURL *)
 void installer_setup_tls(void *curl);

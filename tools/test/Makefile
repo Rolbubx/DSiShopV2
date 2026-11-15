@@ -1,4 +1,4 @@
-# Tests PC de splitfile.c, zip.c, sysupdate.c, twlini.c, instinfo.c et sdscan.c. Nécessite gcc, zlib et Python 3.
+# Tests PC de splitfile.c, zip.c, sysupdate.c, twlini.c, instinfo.c, sdscan.c et dlresume.c. Nécessite gcc, zlib et Python 3.
 SRC := test_zip.c ../../source/splitfile.c ../../source/zip.c
 OUT ?= /tmp/dsishop_tests
 
@@ -31,7 +31,10 @@ test_instinfo: test_instinfo.c ../../source/instinfo.c ../../source/instinfo.h
 test_sdscan: test_sdscan.c ../../source/sdscan.c ../../source/sdscan.h
 	$(CC) $(CFLAGS_TEST) -o $@ test_sdscan.c ../../source/sdscan.c
 
-check: test_zip test_remote lremote_pc test_sysupdate test_twlini test_instinfo test_sdscan
+test_dlresume: test_dlresume.c ../../source/dlresume.c ../../source/dlresume.h
+	$(CC) $(CFLAGS_TEST) -o $@ test_dlresume.c ../../source/dlresume.c
+
+check: test_zip test_remote lremote_pc test_sysupdate test_twlini test_instinfo test_sdscan test_dlresume
 	python3 gen_zips.py $(OUT) $(BIG)
 	./test_zip $(OUT) $(BIG)
 	rm -rf $(OUT)/games_test
@@ -40,9 +43,10 @@ check: test_zip test_remote lremote_pc test_sysupdate test_twlini test_instinfo 
 	./test_twlini $(OUT)
 	./test_instinfo
 	./test_sdscan $(OUT)
+	./test_dlresume $(OUT)/dlresume
 	python3 test_sysupdate.py ./test_sysupdate $(OUT) $(TWL_RELEASE)
 
 clean:
-	rm -f test_zip test_remote lremote_pc test_sysupdate test_twlini test_instinfo test_sdscan
+	rm -f test_zip test_remote lremote_pc test_sysupdate test_twlini test_instinfo test_sdscan test_dlresume
 
 .PHONY: check clean

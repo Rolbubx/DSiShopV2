@@ -18,6 +18,7 @@
 #include <nds.h>
 #include <zlib.h>
 
+#include "dlresume.h"
 #include "games.h"
 #include "installer.h"
 #include "instinfo.h"
@@ -79,6 +80,23 @@ static struct {
     time_t speed_t;            // Mesure du débit : dernière seconde échantillonnée
     uint64_t speed_bytes, speed;
     int next_log_pct;          // Prochain palier de progression à écrire dans le journal
+
+    // Reprise d'un téléchargement interrompu
+    char rs_path[256];         // Fichier de point de reprise
+    dlresume_t rs;             // Point de reprise du téléchargement en cours
+    uint64_t resume_from;      // Octets déjà reçus avant ce téléchargement (0 : depuis le début)
+    bool resume_complete;      // Tout était déjà téléchargé : on passe à l'extraction
+    bool keep_partial;         // Après un échec : garder les octets reçus pour reprendre
+    bool skip_preview;         // Reprise demandée par l'utilisateur : déjà confirmée
+    bool resume_refused;       // Le serveur n'a pas pu / voulu reprendre
+    int http_status;           // Code HTTP de la dernière réponse
+    uint64_t range_total;      // Taille totale annoncée par Content-Range
+    sfile_t *dl;               // Fichier en cours d'écriture (pour les points de reprise)
+    uint64_t last_ckpt;        // Octets au dernier point de reprise
+    time_t last_ckpt_t;
+    CURLcode last_curl;        // Résultat de la dernière requête curl
+    resume_info_t pending;     // Installation interrompue trouvée au démarrage
+    bool pending_valid;
 
     // En-têtes HTTP du dernier téléchargement (pour détecter les mises à jour)
     char etag[80];
@@ -353,6 +371,16 @@ static size_t write_mem(char *ptr, size_t size, size_t nmemb, void *userdata)
 // permet de dépasser la limite de 4 Go par fichier du FAT32
 static size_t write_file(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
+    // Reprise : seule la suite du MÊME fichier convient (réponse 206 dont la taille
+    // totale est la bonne). Tout autre cas, on s'arrête plutôt que de coller deux
+    // fichiers différents : le téléchargement repartira de zéro.
+    if (inst.resume_from > 0 &&
+        (inst.http_status != 206 ||
+         (inst.range_total && inst.rs.total && inst.range_total != inst.rs.total)))
+    {
+        inst.resume_refused = true;
+        return 0;
+    }
     return sfile_write((sfile_t *)userdata, ptr, size * nmemb);
 }
 
@@ -372,6 +400,15 @@ static size_t header_cb(char *buf, size_t size, size_t nitems, void *ud)
         // Nouvelle réponse (redirection) : on oublie les en-têtes précédents
         inst.etag[0] = '\0';
         inst.modified[0] = '\0';
+        inst.range_total = 0;
+        const char *sp = strchr(line, ' ');
+        inst.http_status = sp ? atoi(sp + 1) : 0;
+    }
+    else if (strncasecmp(line, "content-range:", 14) == 0)
+    {
+        // "bytes 100-299/300" : on garde la taille totale
+        const char *slash = strchr(line, '/');
+        inst.range_total = slash ? strtoull(slash + 1, NULL, 10) : 0;
     }
     else if (strncasecmp(line, "etag:", 5) == 0)
     {
@@ -391,12 +428,21 @@ static size_t header_cb(char *buf, size_t size, size_t nitems, void *ud)
     return len;
 }
 
+// Points de reprise : au moins tous les 4 Mo, ou toutes les 15 s s'il y a du nouveau
+#define RESUME_CKPT_BYTES (4u * 1024 * 1024)
+#define RESUME_CKPT_MIN   (64u * 1024)
+#define RESUME_CKPT_SECS  15
+// En dessous de ça, ça ne vaut pas la peine de reprendre : on repart de zéro
+#define RESUME_MIN_BYTES  (64u * 1024)
+
 static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
                        curl_off_t ultotal, curl_off_t ulnow)
 {
     (void)p; (void)ultotal; (void)ulnow;
-    inst.now = (uint64_t)dlnow;
-    inst.total = (uint64_t)dltotal;
+    // Reprise : ce que compte curl s'ajoute à ce qui était déjà sur la carte
+    uint64_t base = inst.file_transfer ? inst.resume_from : 0;
+    inst.now = base + (uint64_t)dlnow;
+    inst.total = dltotal > 0 ? base + (uint64_t)dltotal : 0;
     if (inst.cancel)
         return 1;
 
@@ -412,13 +458,41 @@ static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow,
             inst.speed_bytes = (uint64_t)dlnow;
         }
         // Journal : un point tous les 25 %
-        if (inst.verbose && dltotal > 0 && (int)((uint64_t)dlnow * 100 / (uint64_t)dltotal) >= inst.next_log_pct)
+        if (inst.verbose && inst.total > 0)
         {
-            char a[24], b[24];
-            format_size(a, sizeof(a), (uint64_t)dlnow);
-            format_size(b, sizeof(b), (uint64_t)dltotal);
-            vlog("Téléchargé : %d %% (%s sur %s)", inst.next_log_pct, a, b);
-            inst.next_log_pct += 25;
+            int pct = (int)(inst.now * 100 / inst.total);
+            if (pct >= inst.next_log_pct)
+            {
+                char a[24], b[24];
+                format_size(a, sizeof(a), inst.now);
+                format_size(b, sizeof(b), inst.total);
+                vlog("Téléchargé : %d %% (%s sur %s)", pct, a, b);
+                inst.next_log_pct = (pct / 25 + 1) * 25;
+            }
+        }
+
+        // Point de reprise : on force l'écriture sur la carte, puis on note jusqu'où
+        // le fichier est sûr. Si la console s'éteint, on repartira d'ici.
+        if (inst.dl && inst.rs_path[0])
+        {
+            uint64_t have = inst.dl->size;
+            time_t now_t = time(NULL);
+            if (have >= inst.last_ckpt + RESUME_CKPT_BYTES ||
+                (have >= inst.last_ckpt + RESUME_CKPT_MIN &&
+                 now_t - inst.last_ckpt_t >= RESUME_CKPT_SECS))
+            {
+                if (sfile_sync(inst.dl))
+                {
+                    if (!inst.rs.etag[0] && (inst.http_status == 200 || inst.http_status == 206))
+                        snprintf(inst.rs.etag, sizeof(inst.rs.etag), "%s", inst.etag);
+                    if (!inst.rs.total && inst.total)
+                        inst.rs.total = inst.total;
+                    inst.rs.done = have;
+                    dlresume_save(inst.rs_path, &inst.rs);
+                    inst.last_ckpt = have;
+                    inst.last_ckpt_t = now_t;
+                }
+            }
         }
     }
 
@@ -490,6 +564,15 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
         headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
         headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
     }
+    // Reprise : "If-Range" fait envoyer le fichier entier (au lieu de la suite) si le
+    // serveur en a une autre version depuis, pour ne jamais mélanger deux versions
+    bool resuming = file && inst.resume_from > 0;
+    if (resuming && inst.rs.etag[0])
+    {
+        char hdr[120];
+        snprintf(hdr, sizeof(hdr), "If-Range: %s", inst.rs.etag);
+        headers = curl_slist_append(headers, hdr);
+    }
 
     char errbuf[CURL_ERROR_SIZE];
     errbuf[0] = '\0';
@@ -514,6 +597,11 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
     inst.speed_t = 0;
     inst.speed_bytes = inst.speed = 0;
     inst.next_log_pct = 25;
+    inst.http_status = 0;
+    inst.range_total = 0;
+    inst.resume_refused = false;
+    if (resuming)
+        curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)inst.resume_from);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     inst.file_transfer = file != NULL;
 
@@ -538,6 +626,7 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
     inst.no_space = false;
 
     CURLcode res = curl_easy_perform(curl);
+    inst.last_curl = res;
 
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -593,17 +682,6 @@ static int http_req(const char *url, bool github_api, sfile_t *file, membuf_t *m
                 errbuf[0] ? " / " : "", errbuf);
     }
 #undef ERR
-}
-
-// Version pour l'installation : une erreur fait échouer l'installation
-static int http_get(const char *url, bool github_api, sfile_t *file, membuf_t *mem)
-{
-    char err[192];
-    if (http_req(url, github_api, file, mem, err, sizeof(err)) == 0)
-        return 0;
-    if (inst.cancel && !inst.no_space)
-        return fail("Installation annulée");
-    return fail(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +1000,200 @@ static int extract_zip(sfile_t *sf, const char *out_path)
 // Tâche d'installation (cothread)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Reprise d'un téléchargement interrompu
+// ---------------------------------------------------------------------------
+
+// Efface les octets reçus et leur point de reprise
+static void drop_download(void)
+{
+    sfile_remove(inst.tmp);
+    dlresume_clear(inst.rs_path);
+    inst.pending_valid = false;
+}
+
+// Une panne de réseau (la connexion pourra revenir) : on garde ce qui a été reçu
+static bool is_network_error(CURLcode c)
+{
+    switch (c)
+    {
+        case CURLE_COULDNT_RESOLVE_HOST:
+        case CURLE_COULDNT_CONNECT:
+        case CURLE_OPERATION_TIMEDOUT:
+        case CURLE_RECV_ERROR:
+        case CURLE_SEND_ERROR:
+        case CURLE_GOT_NOTHING:
+        case CURLE_PARTIAL_FILE:
+        case CURLE_SSL_CONNECT_ERROR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Cherche une installation interrompue sur la carte (au démarrage, ou après un échec)
+static void load_pending(void)
+{
+    inst.pending_valid = false;
+    dlresume_t st;
+    if (!inst.rs_path[0] || !dlresume_load(inst.rs_path, &st))
+        return;
+
+    uint64_t have = sfile_existing_size(inst.tmp);
+    uint64_t done = st.complete ? st.total : (have < st.done ? have : st.done);
+    if (have == 0 || (!st.complete && done < RESUME_MIN_BYTES) ||
+        (st.complete && (st.total == 0 || have < st.total)))
+    {
+        drop_download();    // Plus rien d'utilisable : on nettoie
+        return;
+    }
+    memset(&inst.pending, 0, sizeof(inst.pending));
+    snprintf(inst.pending.name, sizeof(inst.pending.name), "%s", st.name);
+    snprintf(inst.pending.release, sizeof(inst.pending.release), "%s", st.release);
+    snprintf(inst.pending.link, sizeof(inst.pending.link), "%s", st.link);
+    inst.pending.done = done;
+    inst.pending.total = st.total;
+    inst.pending.complete = st.complete;
+    inst.pending_valid = true;
+}
+
+// Ce qui est déjà sur la carte correspond-il à ce téléchargement ? (même lien, même
+// fichier, même version, même taille). Sinon on repart de zéro.
+static void decide_resume(uint64_t size_hint)
+{
+    inst.resume_from = 0;
+    inst.resume_complete = false;
+    inst.keep_partial = false;
+    memset(&inst.rs, 0, sizeof(inst.rs));
+    if (inst.updating)
+        return;     // Les mises à jour de jeux ne reprennent pas : elles sont rapides
+
+    dlresume_t st;
+    if (dlresume_load(inst.rs_path, &st) &&
+        dlresume_matches(&st, inst.link, inst.url, inst.release, inst.name, size_hint))
+    {
+        uint64_t have = sfile_existing_size(inst.tmp);
+        uint64_t from = have < st.done ? have : st.done;
+        if (st.complete && st.total > 0 && have >= st.total)
+        {
+            inst.rs = st;
+            inst.resume_complete = true;
+            inst.resume_from = st.total;
+            return;
+        }
+        if (from >= RESUME_MIN_BYTES)
+        {
+            inst.rs = st;
+            inst.rs.complete = false;
+            inst.rs.done = from;
+            inst.resume_from = from;
+            return;
+        }
+    }
+    drop_download();   // Un autre téléchargement, ou rien d'utilisable
+}
+
+// Télécharge inst.url dans inst.tmp en reprenant où ça s'était arrêté si possible.
+// Renvoie 0, ou -1 (état INST_ERROR).
+static int download_with_resume(uint64_t size_hint)
+{
+    char err[192] = "";
+    bool track = !inst.updating;   // Les mises à jour de jeux ne laissent pas de point de reprise
+
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        sfile_t sf;
+        bool opened = false;
+        if (inst.resume_from > 0)
+        {
+            char have[24];
+            format_size(have, sizeof(have), inst.resume_from);
+            opened = sfile_open_resume(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT, inst.resume_from);
+            if (opened)
+                vlog("Reprise : %s déjà sur la SD", have);
+            else
+            {
+                vlog("Morceaux déjà reçus inutilisables : on repart de zéro");
+                drop_download();
+            }
+        }
+        if (!opened)
+        {
+            inst.resume_from = 0;
+            if (!sfile_open_write(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT))
+                return fail("Impossible d'écrire sur la carte SD");
+        }
+
+        // Point de reprise de ce téléchargement (mis à jour pendant le transfert)
+        if (inst.resume_from == 0)
+        {
+            memset(&inst.rs, 0, sizeof(inst.rs));
+            snprintf(inst.rs.link, sizeof(inst.rs.link), "%s", inst.link);
+            snprintf(inst.rs.url, sizeof(inst.rs.url), "%s", inst.url);
+            snprintf(inst.rs.name, sizeof(inst.rs.name), "%s", inst.name);
+            snprintf(inst.rs.release, sizeof(inst.rs.release), "%s", inst.release);
+            inst.rs.total = size_hint;
+        }
+        inst.rs.done = inst.resume_from;
+        inst.rs.complete = false;
+        if (track)
+            dlresume_save(inst.rs_path, &inst.rs);
+        inst.dl = track ? &sf : NULL;
+        inst.last_ckpt = inst.resume_from;
+        inst.last_ckpt_t = time(NULL);
+
+        int ret = http_req(inst.url, false, &sf, NULL, err, sizeof(err));
+        inst.dl = NULL;
+        bool write_ok = sfile_close(&sf);
+        uint64_t got = sf.size;
+
+        // Un serveur qui ne sait pas / ne veut pas reprendre (ou qui a une autre version)
+        // ne nous donne pas la suite du même fichier : on repart de zéro, une seule fois
+        bool refused = inst.resume_from > 0 &&
+                       ((ret != 0 && (inst.resume_refused || inst.last_curl == CURLE_RANGE_ERROR ||
+                                      inst.http_status == 416)) ||
+                        (ret == 0 && inst.rs.total && got != inst.rs.total));
+        if (refused)
+        {
+            vlog("Reprise impossible avec ce serveur : nouveau téléchargement complet");
+            drop_download();
+            inst.resume_from = 0;
+            inst.resume_refused = false;
+            continue;
+        }
+
+        if (ret != 0)
+        {
+            if (inst.cancel && !inst.no_space)
+                return fail("Installation annulée");
+            // Panne de réseau : les octets reçus restent, on pourra reprendre plus tard
+            if (track && !inst.cancel && !inst.no_space && write_ok && got >= RESUME_MIN_BYTES &&
+                is_network_error(inst.last_curl))
+            {
+                char msg[192];
+                inst.keep_partial = true;
+                inst.rs.done = got;
+                if (!inst.rs.etag[0] && (inst.http_status == 200 || inst.http_status == 206))
+                    snprintf(inst.rs.etag, sizeof(inst.rs.etag), "%s", inst.etag);
+                dlresume_save(inst.rs_path, &inst.rs);
+                snprintf(msg, sizeof(msg), "%.110s Relance l'installation pour reprendre.", err);
+                return fail(msg);
+            }
+            return fail(err);
+        }
+        if (!write_ok)
+            return fail("Erreur d'écriture sur la carte SD (pleine ?)");
+
+        // Téléchargé en entier : il ne reste que l'extraction (reprise possible aussi)
+        inst.rs.done = inst.rs.total = got;
+        inst.rs.complete = true;
+        if (track)
+            dlresume_save(inst.rs_path, &inst.rs);
+        return 0;
+    }
+    return fail("Le téléchargement n'a pas pu reprendre");
+}
+
 // Pré-description : rassemble ce qu'on sait de l'installation (nom, auteur,
 // version, taille...) puis attend que l'utilisateur confirme sur la console
 static int preview_and_wait(bool github, const char *api_url)
@@ -954,6 +1226,7 @@ static int preview_and_wait(bool github, const char *api_url)
             vlog("Le site n'indique pas la taille du fichier");
     }
 
+    i->resume_done = inst.resume_complete ? inst.rs.total : inst.resume_from;
     inst.confirmed = false;
     inst.state = INST_PREVIEW;
     set_msg("Vérifie les informations, puis confirme", NULL);
@@ -1049,10 +1322,17 @@ static int do_install(void)
             snprintf(inst.name, sizeof(inst.name), "jeu.nds");
     }
 
-    // 1b. Pré-description (installation lancée depuis la console seulement : une
-    //     demande du Remote ou une mise à jour n'a personne pour confirmer)
-    if (!inst.updating && !inst.remote && preview_and_wait(github, api_url) != 0)
+    // 1b. Un téléchargement interrompu de ce même fichier peut-il reprendre ?
+    uint64_t size_hint = github ? last_asset_size : 0;
+    decide_resume(size_hint);
+
+    // 1c. Pré-description (installation lancée depuis la console seulement : une
+    //     demande du Remote, une mise à jour ou une reprise n'ont personne à qui demander)
+    if (!inst.updating && !inst.remote && !inst.skip_preview &&
+        preview_and_wait(github, api_url) != 0)
         return -1;
+    if (!inst.updating && inst.info.size > size_hint)
+        size_hint = inst.info.size;   // Lien direct : la taille donnée par le site
 
     // 2. Téléchargement
     inst.state = INST_DOWNLOADING;
@@ -1067,16 +1347,16 @@ static int do_install(void)
     // Le fichier est écrit en morceaux de 1 Go (.000, .001...) : un
     // téléchargement de plus de 4 Go passe donc sur une SD en FAT32.
     sfile_t sf;
-    if (!sfile_open_write(&sf, inst.tmp, SPLIT_CHUNK_DEFAULT))
-        return fail("Impossible d'écrire sur la carte SD");
-    int ret = http_get(inst.url, false, &sf, NULL);
-    bool write_ok = sfile_close(&sf);
-    if (ret != 0)
-        return -1;
-    if (!write_ok)
-        return fail("Erreur d'écriture sur la carte SD (pleine ?)");
-
+    if (inst.resume_complete)
     {
+        vlog("Téléchargement déjà complet : on passe à l'extraction");
+        inst.now = inst.total = inst.rs.total;
+    }
+    else
+    {
+        if (download_with_resume(size_hint) != 0)
+            return -1;
+
         char size[24], speed[24];
         long secs = (long)(time(NULL) - download_start);
         format_size(size, sizeof(size), inst.now);
@@ -1094,11 +1374,11 @@ static int do_install(void)
 
     if (is_zip(&sf))
     {
-        ret = extract_zip(&sf, inst.tmp2);
+        int ret = extract_zip(&sf, inst.tmp2);
         sfile_close(&sf);
         if (ret != 0)
             return -1;
-        sfile_remove(inst.tmp); // Libère la place prise par l'archive
+        drop_download(); // Libère la place prise par l'archive
         rom = inst.tmp2;
     }
     else
@@ -1150,7 +1430,7 @@ static int do_install(void)
     if (inst.updating && same_content(rom, inst.dest))
     {
         // Le serveur ne disait pas si le fichier avait changé : il n'a pas changé
-        sfile_remove(inst.tmp);
+        drop_download();
         remove(inst.tmp2);
         games_record(inst.dir, &rec);
         inst.up_to_date = true;
@@ -1179,7 +1459,7 @@ static int do_install(void)
         return fail("Impossible de renommer le fichier sur la carte SD");
     }
 
-    sfile_remove(inst.tmp);
+    drop_download();     // Installé : plus rien à reprendre
     remove(inst.tmp2);
 
     // Retient d'où vient le jeu et l'adresse exacte du téléchargement
@@ -1203,10 +1483,15 @@ static int install_thread(void *arg)
     int ret = do_install();
     if (ret != 0)
     {
-        // Nettoie les fichiers temporaires en cas d'échec
-        sfile_remove(inst.tmp);
+        // Nettoie les fichiers temporaires en cas d'échec... sauf les octets déjà reçus
+        // après une panne de réseau : ils serviront à reprendre l'installation
         remove(inst.tmp2);
+        if (inst.keep_partial)
+            load_pending();
+        else
+            drop_download();
     }
+    inst.skip_preview = false;
     return ret;
 }
 
@@ -1252,6 +1537,12 @@ bool installer_init(void)
     // En mode DSi on utilise la carte SD interne, sinon le linker (DLDI)
     snprintf(inst.root, sizeof(inst.root), "%s", isDSiMode() ? "sd:" : "fat:");
     snprintf(inst.dir, sizeof(inst.dir), "%s/roms/nds", inst.root);
+
+    // Installation interrompue (console éteinte, Wi-Fi perdu...) à reprendre ?
+    snprintf(inst.tmp, sizeof(inst.tmp), "%s/.dsishop_download", inst.dir);
+    snprintf(inst.rs_path, sizeof(inst.rs_path), "%s/.dsishop_resume", inst.dir);
+    if (inst.storage_ok)
+        load_pending();
 
     // Verbose : oui tant qu'on ne l'a pas coupé (réglage mémorisé sur la SD)
     char v[8];
@@ -1421,7 +1712,36 @@ bool installer_start_ex(const char *link, bool remote)
     if (!can_start())
         return false;
     inst.updating = false;
+    inst.skip_preview = false;
     return installer_start_link(link, remote);
+}
+
+const resume_info_t *installer_resume_pending(void)
+{
+    return inst.pending_valid ? &inst.pending : NULL;
+}
+
+bool installer_resume_start(void)
+{
+    if (!inst.pending_valid || !can_start())
+        return false;
+    inst.updating = false;
+    inst.skip_preview = true;       // Déjà confirmée avant l'interruption
+    char link[256];
+    snprintf(link, sizeof(link), "%s", inst.pending.link);
+    if (!installer_start_link(link, false))
+    {
+        inst.skip_preview = false;
+        return false;
+    }
+    return true;
+}
+
+void installer_resume_discard(void)
+{
+    if (inst.state >= INST_RESOLVING && inst.state <= INST_VERIFYING)
+        return;                     // Un téléchargement est en cours
+    drop_download();
 }
 
 bool installer_update(const char *file, bool remote)

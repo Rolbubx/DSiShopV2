@@ -864,19 +864,40 @@ class Handler(BaseHTTPRequestHandler):
         asset = next((a for a in rel.get("assets", []) if a.get("name") == name), None)
         if not asset or asset.get("size", 0) > MAX_FILE:
             return self.reply(404, "not found\n")
+        size = asset.get("size", 0)
+        etag = '"%s"' % asset.get("updated_at", asset.get("id", ""))
+        start = self.range_start(size, etag)
+        if start < 0:                      # Asked for bytes beyond the end of the file
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % size)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        headers = {"User-Agent": "dsishop-catalog"}
+        if start:
+            headers["Range"] = "bytes=%d-" % start
         try:
             up = urllib.request.urlopen(urllib.request.Request(
-                asset["browser_download_url"], headers={"User-Agent": "dsishop-catalog"}),
-                timeout=60)
+                asset["browser_download_url"], headers=headers), timeout=60)
         except Exception as e:
             return self.github_error(e)
         with up:
-            self.send_response(200)
+            # An upstream that ignores the range sends the whole file: drop the start ourselves
+            skip = start if start and getattr(up, "status", 200) != 206 else 0
+            self.send_response(206 if start else 200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(asset.get("size", 0)))
-            self.send_header("ETag", '"%s"' % asset.get("updated_at", asset.get("id", "")))
+            self.send_header("Content-Length", str(size - start))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("ETag", etag)
+            if start:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, size - 1, size))
             self.end_headers()
             try:
+                while skip > 0:
+                    dropped = up.read(min(skip, 65536))
+                    if not dropped:
+                        return
+                    skip -= len(dropped)
                 while True:
                     chunk = up.read(65536)
                     if not chunk:
@@ -884,6 +905,22 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionError):
                 pass
+
+    def range_start(self, size, etag):
+        """First byte asked for by "Range: bytes=N-": 0 for the whole file, -1 when N is
+        past the end. Only this open-ended form is supported: it is what resuming an
+        interrupted download needs. If-Range with another ETag (the file changed since)
+        also gives the whole file, so a resume never glues two different files."""
+        m = re.fullmatch(r"bytes=(\d{1,15})-", self.headers.get("Range", "").strip())
+        if not m or size <= 0:
+            return 0
+        if_range = self.headers.get("If-Range")
+        if if_range and if_range.strip() != etag:
+            return 0
+        start = int(m.group(1))
+        if start == 0:
+            return 0
+        return -1 if start >= size else start
 
     def serve_twilight(self, parts):
         if parts == ["twilight", "manifest"]:

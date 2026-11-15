@@ -460,3 +460,21 @@ const char *installer_rom_kind_text(const char *dir, const char *file)
     (void)dir;
     return strstr(file, "Doom") ? "homebrew (lancement direct)" : "jeu DS (nds-bootstrap)";
 }
+
+// Reprise d'une installation interrompue (simulée : activée par sim_set_pending)
+static bool pending_on;
+static resume_info_t pending = { .name = "MonJeu-v1.2.zip", .release = "v1.2.0",
+                                 .link = "github.com/auteur/monjeu",
+                                 .done = 2800000000ull, .total = 6764573491ull };
+void sim_set_pending(bool on) { pending_on = on; }
+const resume_info_t *installer_resume_pending(void) { return pending_on ? &pending : NULL; }
+bool installer_resume_start(void)
+{
+    if (!pending_on)
+        return false;
+    pending_on = false;
+    bool ok = installer_start_ex(pending.link, false);
+    previewed = true;                 // Déjà confirmée : pas de pré-description
+    return ok;
+}
+void installer_resume_discard(void) { pending_on = false; }

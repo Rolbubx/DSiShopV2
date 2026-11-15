@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "splitfile.h"
 
@@ -51,6 +52,77 @@ bool sfile_open_write(sfile_t *sf, const char *base, uint64_t chunk)
     sf->writing = true;
     sfile_remove(base); // Pas de vieux morceaux qui traînent
     return open_part(sf, 0);
+}
+
+uint64_t sfile_existing_size(const char *base)
+{
+    uint64_t size = 0;
+    for (unsigned int n = 0; n < SPLIT_MAX_PARTS; n++)
+    {
+        char path[256];
+        struct stat st;
+        sfile_part_path(base, n, path, sizeof(path));
+        if (stat(path, &st) != 0)
+            break;
+        size += (uint64_t)st.st_size;
+    }
+    return size;
+}
+
+bool sfile_open_resume(sfile_t *sf, const char *base, uint64_t chunk, uint64_t pos)
+{
+    memset(sf, 0, sizeof(*sf));
+    snprintf(sf->base, sizeof(sf->base), "%s", base);
+    sf->chunk = chunk;
+    sf->writing = true;
+
+    // Les morceaux avant la position doivent être là, et pleins
+    unsigned int last = (unsigned int)(pos / chunk);
+    uint64_t off = pos % chunk;
+    for (unsigned int n = 0; n < last; n++)
+    {
+        char path[256];
+        struct stat st;
+        sfile_part_path(base, n, path, sizeof(path));
+        if (stat(path, &st) != 0 || (uint64_t)st.st_size != chunk)
+            return false;
+    }
+
+    sf->pos = sf->size = pos;
+    if (off == 0)
+        return true;            // Le prochain morceau sera créé à la première écriture
+
+    // Morceau en cours : on le rouvre sans le vider et on se place à l'offset
+    char path[256];
+    struct stat st;
+    sfile_part_path(base, last, path, sizeof(path));
+    if (stat(path, &st) != 0 || (uint64_t)st.st_size < off)
+        return false;
+    sf->f = fopen(path, "r+b");
+    if (!sf->f)
+        return false;
+    // off < chunk <= 1 Gio : tient dans un long
+    if (fseek(sf->f, (long)off, SEEK_SET) != 0)
+    {
+        fclose(sf->f);
+        sf->f = NULL;
+        return false;
+    }
+    setvbuf(sf->f, NULL, _IOFBF, 32 * 1024);
+    sf->part = last;
+    return true;
+}
+
+bool sfile_sync(sfile_t *sf)
+{
+    if (!sf->f)
+        return !sf->error;
+    if (fflush(sf->f) != 0 || fsync(fileno(sf->f)) != 0)
+    {
+        sf->error = true;
+        return false;
+    }
+    return true;
 }
 
 size_t sfile_write(sfile_t *sf, const void *data, size_t len)

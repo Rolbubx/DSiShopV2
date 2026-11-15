@@ -6,7 +6,7 @@
 #include "input.h"
 
 #define APP_NAME    "DSi Shop"
-#define APP_VERSION "0.8.1"
+#define APP_VERSION "0.9.0"
 
 void app_init(bool wifi_ok);
 // Une frame : logique + dessin des écrans qui ont changé

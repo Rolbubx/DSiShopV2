@@ -60,6 +60,7 @@ source/
   twlini.c/.h   réglages de TWiLight Menu++ : lancement de DSi Shop au démarrage (portable)
   instinfo.c/.h pré-description d'une installation : taille, auteur, débit (portable)
   sdscan.c/.h   recherche de tous les jeux de la carte SD, par étapes (portable)
+  dlresume.c/.h point de reprise d'un téléchargement interrompu (portable)
   cacert.s      embarque data/cacert.pem (certificats racines)
   games.c/.h    jeux installés, désinstallation, registre .dsishop.tsv (portable)
   remote.c/.h   client du serveur Remote (long polling HTTPS, cothread)
@@ -303,6 +304,31 @@ notée dans `_dsishop/prev_autorun` et **remise au prochain démarrage de DSi Sh
 annule le lancement). Tant que DSi Shop n'a pas été rouvert, TWiLight relancera ce jeu
 à chaque démarrage : maintenir **B** ouvre son menu. Seulement sur la carte SD de la console
 (chemins `sd:/…`), avec TWiLight Menu++ installé.
+
+## Reprise d'une installation interrompue
+
+Si un téléchargement s'arrête (console éteinte, batterie, Wi-Fi perdu…), DSi Shop reprend au
+dernier point sûr au lieu de tout recommencer :
+
+- les octets reçus restent sur la carte (`.dsishop_download.000`…) avec un **point de reprise**
+  (`.dsishop_resume`) écrit au moins tous les **4 Mo** ou toutes les **15 s**, après avoir forcé
+  l'écriture sur la SD (`fsync`) : on ne perd que le dernier bout ;
+- au démarrage, la tuile « Installer un jeu » affiche « Reprendre (42 %) » et un message le
+  rappelle ; l'écran Installer propose **Reprendre** ou **Abandonner** (efface ce qui a été reçu) ;
+- relancer à la main la même installation (même lien) reprend aussi, et la pré-description
+  indique « Reprise : 42 % déjà sur la SD » ;
+- si tout était déjà téléchargé et que la console s'est éteinte pendant l'extraction, on repart
+  directement à l'extraction ;
+- **jamais de mélange de deux fichiers** : la reprise n'a lieu que si le lien, le fichier, la
+  version et la taille sont identiques, et la demande contient `If-Range` (l'ETag du fichier) ;
+  le serveur répond `206` avec la suite, ou le fichier entier s'il a changé, et dans ce cas (ou
+  s'il ne sait pas reprendre, ou répond `416`) la console repart de zéro une seule fois ;
+- **Annuler** pendant un téléchargement efface ce qui a été reçu ; une erreur autre qu'une panne
+  de réseau (ROM invalide, plus de place…) aussi. Les mises à jour de jeux ne reprennent pas.
+
+Le serveur du catalogue accepte `Range: bytes=N-` sur `/file/…` (tests :
+`python3 catalog-server/test_range.py`). Un serveur qui n'accepte pas les requêtes partielles
+oblige simplement à repartir de zéro.
 
 ## Pré-description et mode Verbose
 

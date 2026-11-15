@@ -87,6 +87,7 @@ static void press(uint32_t key)
 
 extern char sim_games_dir[512];
 extern char sim_root[512];
+void sim_set_pending(bool on);
 void remote_sim_pair(const char *name, const char *mail);
 
 static void fake_rom(const char *name, size_t size)
@@ -311,6 +312,15 @@ int main(int argc, char **argv)
     save(dir, "20_install_detaillee");
     frames(200);
     save(dir, "21_install_terminee");
+
+    // Installation interrompue (console éteinte pendant un téléchargement) : proposition de reprise
+    sim_set_pending(true);
+    tap(128, 159);             // Écran de fin : "Plus tard (installer un autre jeu)"
+    frames(5);
+    save(dir, "22_reprise_proposee");
+    tap(128, 113);             // Reprendre
+    frames(60);
+    save(dir, "23_reprise_en_cours");
     lremote_net_stop();
         return 0;
 }

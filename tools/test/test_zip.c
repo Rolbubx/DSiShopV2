@@ -123,6 +123,71 @@ static void test_split_write(uint64_t chunk)
     CHECK(!sfile_open_read(&sf, base, chunk), "morceaux non supprimés");
 }
 
+
+// Reprise d'une écriture interrompue : le résultat doit être identique à une écriture d'un trait
+static void test_split_resume(uint64_t chunk, uint64_t first, uint64_t stale_extra)
+{
+    printf("splitfile reprise (morceaux de %llu, interruption à %llu, +%llu octets non confirmés)\n",
+           (unsigned long long)chunk, (unsigned long long)first, (unsigned long long)stale_extra);
+
+    char base[600];
+    snprintf(base, sizeof(base), "%s/resume", dir);
+    sfile_remove(base);
+
+    unsigned char data[10007];
+    for (size_t i = 0; i < sizeof(data); i++)
+        data[i] = (unsigned char)(i * 131 + 17);
+
+    // 1re passe : écrit un peu plus que le point de reprise "confirmé", puis la console s'éteint
+    sfile_t sf;
+    CHECK(sfile_open_write(&sf, base, chunk), "ouverture");
+    CHECK(sfile_write(&sf, data, first + stale_extra) == first + stale_extra, "1re écriture");
+    CHECK(sfile_sync(&sf), "synchronisation");
+    CHECK(sfile_close(&sf), "fermeture");
+    CHECK(sfile_existing_size(base) == first + stale_extra, "taille présente : %llu",
+          (unsigned long long)sfile_existing_size(base));
+
+    // 2e passe : on repart du point confirmé (`first`) et on écrit la suite
+    CHECK(sfile_open_resume(&sf, base, chunk, first), "reprise");
+    CHECK(sf.pos == first && sf.size == first, "position après reprise");
+    size_t pos = (size_t)first;
+    size_t step = 7;
+    while (pos < sizeof(data))
+    {
+        size_t n = step < sizeof(data) - pos ? step : sizeof(data) - pos;
+        CHECK(sfile_write(&sf, data + pos, n) == n, "écriture de la suite");
+        pos += n;
+        step = step * 2 + 3;
+    }
+    CHECK(sfile_close(&sf), "fermeture après reprise");
+    CHECK(sfile_existing_size(base) == sizeof(data), "taille finale %llu",
+          (unsigned long long)sfile_existing_size(base));
+
+    unsigned char back[sizeof(data)];
+    CHECK(sfile_open_read(&sf, base, chunk) && sf.size == sizeof(data), "relecture");
+    CHECK(sfile_read(&sf, back, sizeof(back)) == sizeof(back), "lecture complète");
+    CHECK(memcmp(back, data, sizeof(data)) == 0, "contenu différent d'une écriture d'un trait");
+    sfile_close(&sf);
+
+    // Reprise impossible : au-delà de ce qui existe, ou un morceau manquant
+    CHECK(!sfile_open_resume(&sf, base, chunk, sizeof(data) + chunk), "reprise au-delà de la fin");
+    if (chunk < sizeof(data) / 2)
+    {
+        char part[700];
+        sfile_part_path(base, 0, part, sizeof(part));
+        remove(part);
+        CHECK(!sfile_open_resume(&sf, base, chunk, chunk + 1), "reprise avec un morceau manquant");
+        // sfile_remove s'arrête au premier trou : on nettoie les morceaux orphelins à la main
+        for (unsigned int n = 1; n < 2000; n++)
+        {
+            char part[700];
+            sfile_part_path(base, n, part, sizeof(part));
+            remove(part);
+        }
+    }
+    sfile_remove(base);
+}
+
 // Au-delà de 1000 morceaux, l'écriture doit échouer proprement
 static void test_too_many_parts(void)
 {
@@ -150,6 +215,11 @@ int main(int argc, char **argv)
     test_too_many_parts();
     test_split_write(4096);
     test_split_write(1 << 20);
+    test_split_resume(13, 30, 0);          // au milieu d'un morceau
+    test_split_resume(13, 26, 0);          // pile à une frontière de morceau
+    test_split_resume(13, 0, 40);          // depuis le début, avec des octets non confirmés
+    test_split_resume(4096, 5000, 1500);   // octets non confirmés réécrits
+    test_split_resume(1 << 20, 6000, 0);   // un seul morceau
 
     test_zip("deflate", 1000, ZIP_OK, "MonJeu.nds");
     test_zip("stored", 4096, ZIP_OK, "Truc.nds");

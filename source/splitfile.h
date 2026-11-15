@@ -33,6 +33,14 @@ void sfile_part_path(const char *base, unsigned int n, char *out, size_t size);
 bool sfile_open_write(sfile_t *sf, const char *base, uint64_t chunk);
 size_t sfile_write(sfile_t *sf, const void *data, size_t len);
 
+// Reprend l'écriture d'un fichier interrompu à la position pos : les morceaux déjà
+// écrits sont gardés (ce qui dépasse pos sera réécrit). Échoue si les morceaux
+// présents ne couvrent pas pos.
+bool sfile_open_resume(sfile_t *sf, const char *base, uint64_t chunk, uint64_t pos);
+// Taille de ce qui est déjà écrit (somme des morceaux consécutifs ; 0 si rien)
+uint64_t sfile_existing_size(const char *base);
+// Force l'écriture sur la carte (point de reprise sûr, même si la console s'éteint)
+bool sfile_sync(sfile_t *sf);
 bool sfile_open_read(sfile_t *sf, const char *base, uint64_t chunk);
 size_t sfile_read(sfile_t *sf, void *data, size_t len);
 bool sfile_seek(sfile_t *sf, uint64_t pos);

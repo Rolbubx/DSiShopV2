@@ -67,6 +67,8 @@ jobs:
         run: python3 catalog-server/test_udb.py
       - name: Serveur du catalogue (mise à jour automatique)
         run: python3 catalog-server/test_autoupdate.py
+      - name: Serveur du catalogue (reprise des téléchargements, requêtes partielles)
+        run: python3 catalog-server/test_range.py
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots

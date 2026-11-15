@@ -20,3 +20,4 @@ udb.json
 catalog-server/*.prev
 tools/test/test_instinfo
 tools/test/test_sdscan
+tools/test/test_dlresume

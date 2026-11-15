@@ -150,6 +150,8 @@ void app_init(bool wifi_ok)
     app.top_signature = 0xFFFFFFFF;
     snprintf(app.url, sizeof(app.url), "github.com/");
     app.last_inst_state = INST_IDLE;
+    if (installer_resume_pending())
+        ui_toast("Installation interrompue : prête à reprendre");
     app.remote_tab = RTAB_LOCAL;
 
     // Thème choisi précédemment (clair / sombre)
@@ -612,6 +614,12 @@ static void draw_net_card(canvas_t *c, rect_t r)
     }
 }
 
+// Avancement (en %) d'une installation interrompue
+static int resume_percent(const resume_info_t *r)
+{
+    return r->total > 0 ? (int)(r->done * 100 / r->total) : 0;
+}
+
 // Une ligne "Libellé  valeur" de la pré-description (renvoie sa hauteur)
 #define FIELD_LABEL_W 64
 static int draw_field(canvas_t *c, int x, int y, int w, const char *label,
@@ -948,6 +956,40 @@ static void draw_top(canvas_t *c)
                 break;
             }
 
+            const resume_info_t *pend = installer_resume_pending();
+            if ((st == INST_IDLE || st == INST_DONE) && pend && !manage)
+            {
+                // Installation interrompue : ce qui est déjà reçu reste sur la carte
+                int x = r.x + 8, w = r.w - 16, y = r.y + 6;
+                char line[200], a[24], b[24];
+                gfx_text_box(c, &font_body, x, y, w, ALIGN_LEFT, "Installation interrompue", COL_WARN);
+                y += font_body.height + 3;
+                gfx_text_box(c, &font_body, x, y, w, ALIGN_LEFT, pend->name, COL_TEXT);
+                y += font_body.height + 2;
+                if (pend->release[0])
+                {
+                    gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, pend->release, COL_TEXT_DIM);
+                    y += font_small.height + 2;
+                }
+                draw_progress_bar(c, RECT(x, y + 2, w, 8), pend->done, pend->total);
+                y += 14;
+                format_size(a, sizeof(a), pend->done);
+                if (pend->total > 0)
+                {
+                    format_size(b, sizeof(b), pend->total);
+                    snprintf(line, sizeof(line), "%d %% : %s sur %s", resume_percent(pend), a, b);
+                }
+                else
+                    snprintf(line, sizeof(line), "%s déjà reçus", a);
+                gfx_text_box(c, &font_small, x, y, w, ALIGN_LEFT, line, COL_TEXT_DIM);
+                y += font_small.height + 4;
+                gfx_text_wrap(c, &font_small, x, y, w, r.y + r.h - 4 - y,
+                              pend->complete ? "Tout est téléchargé : il reste à l'extraire."
+                                             : "Reprendre continue là où ça s'est arrêté.",
+                              COL_TEXT_OFF);
+                break;
+            }
+
             if (st == INST_IDLE || st == INST_DONE)
             {
                 char help[320];
@@ -1014,6 +1056,14 @@ static void draw_top(canvas_t *c)
                         snprintf(line, sizeof(line), "%s", size);
                 }
                 y += draw_field(c, x, y, w, "Taille", line, size_col);
+                if (i->resume_done)
+                {
+                    char done[24];
+                    format_size(done, sizeof(done), i->resume_done);
+                    snprintf(line, sizeof(line), "%d %% déjà sur la SD (%s)",
+                             i->size ? (int)(i->resume_done * 100 / i->size) : 0, done);
+                    y += draw_field(c, x, y, w, "Reprise", line, COL_OK);
+                }
                 if (installer_verbose() && i->archive)
                     y += draw_field(c, x, y, w, "Format", "archive .zip (la ROM sera extraite)",
                                     COL_TEXT_DIM);
@@ -1220,6 +1270,8 @@ static uint32_t top_signature(void)
     MIX((uintptr_t)http_progress_text()[0]);
     MIX(net_signal_bars());
     MIX(installer_state());
+    MIX(installer_resume_pending() != NULL);
+    MIX(installer_resume_pending() ? installer_resume_pending()->done / 4096 : 0);
     MIX(app.install_tab);
     MIX(app.sdscan.count);
     MIX(app.sdscan.dirs);
@@ -1278,7 +1330,11 @@ static void screen_home(canvas_t *c, const input_t *in)
         refresh_games();
 
     // Les deux grandes tuiles : installer, et gérer tous les jeux de la carte SD
-    if (ui_tile(c, RECT(8, 27, 116, 84), "Installer un jeu", "GitHub ou un lien",
+    const resume_info_t *pend = installer_resume_pending();
+    char install_sub[40] = "GitHub ou un lien";
+    if (pend)
+        snprintf(install_sub, sizeof(install_sub), "Reprendre (%d %%)", resume_percent(pend));
+    if (ui_tile(c, RECT(8, 27, 116, 84), "Installer un jeu", install_sub,
                 ICON_DOWNLOAD, true))
     {
         app.install_tab = TAB_INSTALL;
@@ -2202,6 +2258,37 @@ static void screen_install(canvas_t *c, const input_t *in)
                       true) ||
             (in->down & BTN_B))
             installer_cancel();
+        return;
+    }
+
+    // Installation interrompue : reprendre là où ça s'est arrêté, ou abandonner
+    const resume_info_t *pend = installer_resume_pending();
+    if (pend && !busy)
+    {
+        char label[48];
+        snprintf(label, sizeof(label), pend->complete ? "Terminer l'installation" : "Reprendre (%d %%)",
+                 resume_percent(pend));
+        gfx_text_wrap(c, &font_small, 10, 52, SCREEN_W - 20, 40,
+                      "Le téléchargement s'est arrêté (console éteinte, Wi-Fi perdu…). "
+                      "Ce qui a été reçu est gardé sur la carte SD ; « Abandonner » l'efface.", COL_TEXT_DIM);
+        if (ui_button(c, RECT(BTN_X0, 98, BTN_W, BTN_H), label, BTN_STYLE_PRIMARY,
+                      online && installer_storage_ok()) ||
+            (online && (in->down & BTN_START)))
+        {
+            if (!installer_resume_start())
+                ui_toast("Impossible de reprendre maintenant");
+            return;
+        }
+        if (ui_button(c, RECT(BTN_X0, 134, BTN_W, BTN_H), "Abandonner",
+                      BTN_STYLE_DANGER, true))
+        {
+            installer_resume_discard();
+            app.force_redraw = true;
+            ui_toast("Installation abandonnée");
+        }
+        if (!online)
+            gfx_text_box(c, &font_small, 0, SCREEN_H - 16, SCREEN_W, ALIGN_CENTER,
+                         "Connecte-toi d'abord au Wi-Fi", COL_WARN);
         return;
     }
 
