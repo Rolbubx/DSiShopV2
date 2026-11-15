@@ -284,8 +284,9 @@ Dans la fiche d'un jeu (Mes jeux ou Toute la SD), **Lancer** démarre le jeu *vi
 Menu++*. Une application BlocksDS ne peut pas en démarrer une autre directement ; DSi Shop
 utilise donc le réglage « lancer la dernière ROM » de TWiLight (`AUTORUNGAME` dans
 `_nds/TWiLightMenu/settings.ini`, le même que « Au démarrage ») : il note le jeu comme
-dernière ROM lancée, puis redémarre la console (compte à rebours de 3 s, annulable). TWiLight
-démarre alors le jeu tout seul.
+dernière ROM lancée, puis redémarre la console presque tout de suite (0,3 s, le temps
+d'afficher « Lancement… » ; garder B appuyé à ce moment annule). TWiLight démarre alors le jeu
+tout seul.
 
 TWiLight lance les jeux de façons différentes selon leur type, qu'il reconnaît à l'en-tête de
 la ROM. DSi Shop reprend ses règles (voir `twlini_classify_rom`) :
@@ -299,7 +300,7 @@ la ROM. DSi Shop reprend ses règles (voir `twlini_classify_rom`) :
 
 Les autres réglages de TWiLight ne sont pas touchés. L'ancienne valeur de `AUTORUNGAME` est
 notée dans `_dsishop/prev_autorun` et **remise au prochain démarrage de DSi Shop** (ou si on
-annule le compte à rebours). Tant que DSi Shop n'a pas été rouvert, TWiLight relancera ce jeu
+annule le lancement). Tant que DSi Shop n'a pas été rouvert, TWiLight relancera ce jeu
 à chaque démarrage : maintenir **B** ouvre son menu. Seulement sur la carte SD de la console
 (chemins `sd:/…`), avec TWiLight Menu++ installé.
 

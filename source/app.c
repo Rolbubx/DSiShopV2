@@ -41,7 +41,7 @@ typedef enum {
     SCREEN_BROWSE,        // Liste des projets de cet utilisateur
     SCREEN_TWL,           // Mise à jour de TWiLight Menu++
     SCREEN_SETTINGS,      // Réglages : thème, Verbose, démarrage
-    SCREEN_LAUNCH,        // Lancement d'un jeu : compte à rebours avant le redémarrage
+    SCREEN_LAUNCH,        // Lancement d'un jeu : redémarrage presque immédiat
 } app_screen_t;
 
 // Actions qui demandent une confirmation
@@ -60,8 +60,9 @@ enum { BMODE_SEARCH, BMODE_USER };
 // Onglets de l'écran "Installer un jeu" / "Gérer les jeux"
 enum { TAB_INSTALL, TAB_GAMES, TAB_SD };
 
-// Délai avant le redémarrage qui lance le jeu (laisse le temps d'annuler)
-#define LAUNCH_DELAY_FRAMES (3 * 60)
+// Délai avant le redémarrage qui lance le jeu : presque immédiat (0,3 s), juste le
+// temps d'afficher l'écran "Lancement"
+#define LAUNCH_DELAY_FRAMES 18
 
 // Taille max d'un QR code (version 10 : URL jusqu'à ~170 caractères)
 #define QR_MAX_VERSION 10
@@ -1232,8 +1233,6 @@ static uint32_t top_signature(void)
     MIX((unsigned char)installer_message()[0]);
     if (app.screen == SCREEN_INSTALL_DONE)
         MIX(reboot_seconds_left());
-    if (app.screen == SCREEN_LAUNCH)
-        MIX((LAUNCH_DELAY_FRAMES - (int)(app.frame - app.launch_frame)) / 60);
     MIX(time(NULL) / 60);
     MIX(lremote_enabled());
     MIX(lremote_net_running());
@@ -2420,19 +2419,17 @@ static void screen_game(canvas_t *c, const input_t *in)
         back_to_games();
 }
 
-// Compte à rebours avant le redémarrage qui lance le jeu : on peut encore annuler
+// Lancement d'un jeu : la console redémarre presque tout de suite. Rester appuyé sur B
+// pendant ce court instant annule (les réglages de TWiLight sont remis).
 static void screen_launch(canvas_t *c, const input_t *in)
 {
     ui_header(c, "Lancement", NULL);
 
     int left = LAUNCH_DELAY_FRAMES - (int)(app.frame - app.launch_frame);
-    ui_spinner(c, SCREEN_W / 2, 56, 8, app.frame, COL_ACCENT);
-    char line[96];
-    snprintf(line, sizeof(line), "Redémarrage dans %d s…", left > 0 ? (left + 59) / 60 : 0);
-    gfx_text_box(c, &font_body, 8, 74, SCREEN_W - 16, ALIGN_CENTER, line, COL_TEXT);
+    ui_spinner(c, SCREEN_W / 2, 80, 10, app.frame, COL_ACCENT);
+    gfx_text_box(c, &font_body, 8, 102, SCREEN_W - 16, ALIGN_CENTER, "Lancement…", COL_TEXT);
 
-    if (ui_button(c, RECT(BTN_X0, 110, BTN_W, BTN_H), "Annuler", BTN_STYLE_DANGER, left > 0) ||
-        ((in->down & BTN_B) && left > 0))
+    if ((in->down & BTN_B) && left > 0)
     {
         installer_launch_restore();   // Remet le réglage de TWiLight d'avant
         go(SCREEN_GAME);
